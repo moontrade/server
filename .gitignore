@@ -1,3 +1,7 @@
+.idea
+.vscode
+build
+cmake-build-debug
 # Binaries for programs and plugins
 *.exe
 *.exe~
