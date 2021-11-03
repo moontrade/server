@@ -3,7 +3,7 @@ package app
 import "github.com/golang/snappy"
 
 // runWriteApplier is a background routine that handles all write requests.
-// It's job is to apply the request to the Raft log and returns the result to
+// Its job is to apply the request to the Raft log and returns the result to
 // writeRequest.
 func runWriteApplier(conf Config, m *machine, ra *raftWrap) {
 	var maxReqs = 1024 // TODO: make configurable

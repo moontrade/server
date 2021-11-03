@@ -194,18 +194,16 @@ func (l *Leaf) Key() memory.FatPointer {
 		uintptr(*(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(l)) + unsafe.Sizeof(uintptr(0))))))
 }
 
-type artNewT struct {
-	threadSafe uintptr
-	ptr        uintptr
-	code       uintptr
-}
-
 func NewART() (*ART, int) {
 	return NewARTThreadSafe(false)
 }
 
 func NewARTThreadSafe(threadSafe bool) (*ART, int) {
-	args := artNewT{}
+	args := struct {
+		threadSafe uintptr
+		ptr        uintptr
+		code       uintptr
+	}{}
 	if threadSafe {
 		args.threadSafe = 1
 	}
@@ -245,16 +243,14 @@ type Value struct {
 	Data   uintptr
 }
 
-type artInsertT struct {
-	tree  uintptr
-	key   uintptr
-	len   uintptr
-	value Value
-	old   Value
-}
-
 func (r *ART) Insert(key memory.Pointer, size int, value Value) Value {
-	args := artInsertT{
+	args := struct {
+		tree  uintptr
+		key   uintptr
+		len   uintptr
+		value Value
+		old   Value
+	}{
 		tree:  uintptr(unsafe.Pointer(r)),
 		key:   uintptr(key),
 		len:   uintptr(size),
@@ -280,7 +276,13 @@ func (r *ART) InsertSlice(key []byte, value Value) Value {
 }
 
 func (r *ART) InsertNoReplace(key memory.Pointer, size int, value Value) Value {
-	args := artInsertT{
+	args := struct {
+		tree  uintptr
+		key   uintptr
+		len   uintptr
+		value Value
+		old   Value
+	}{
 		tree:  uintptr(unsafe.Pointer(r)),
 		key:   uintptr(key),
 		len:   uintptr(size),
@@ -305,15 +307,13 @@ func (r *ART) InsertNoReplaceSlice(key []byte, value Value) Value {
 	return r.InsertNoReplace(memory.Pointer(k.Data), int(k.Len), value)
 }
 
-type artDeleteT struct {
-	tree uintptr
-	key  uintptr
-	len  uintptr
-	item uintptr
-}
-
 func (r *ART) Delete(key memory.Pointer, size int) memory.Pointer {
-	args := artDeleteT{
+	args := struct {
+		tree uintptr
+		key  uintptr
+		len  uintptr
+		item uintptr
+	}{
 		tree: uintptr(unsafe.Pointer(r)),
 		key:  uintptr(key),
 		len:  uintptr(size),
@@ -327,15 +327,13 @@ func (r *ART) DeleteBytes(key memory.Bytes) memory.Pointer {
 	return r.Delete(key.Pointer, key.Len())
 }
 
-type artSearchT struct {
-	tree   uintptr
-	s      uintptr
-	len    uintptr
-	result Value
-}
-
 func (r *ART) Find(key memory.Pointer, size int) Value {
-	args := artSearchT{
+	args := struct {
+		tree   uintptr
+		s      uintptr
+		len    uintptr
+		result Value
+	}{
 		tree: uintptr(unsafe.Pointer(r)),
 		s:    uintptr(key),
 		len:  uintptr(size),
@@ -349,14 +347,12 @@ func (r *ART) FindBytes(key memory.Bytes) Value {
 	return r.Find(key.Pointer, key.Len())
 }
 
-type artTreeMinmaxT struct {
-	tree    uintptr
-	result  uintptr
-	result2 uintptr
-}
-
 func (r *ART) Minimum() *Leaf {
-	args := artTreeMinmaxT{
+	args := struct {
+		tree    uintptr
+		result  uintptr
+		result2 uintptr
+	}{
 		tree: uintptr(unsafe.Pointer(r)),
 	}
 	ptr := uintptr(unsafe.Pointer(&args))
@@ -367,7 +363,11 @@ func (r *ART) Minimum() *Leaf {
 // Maximum Returns the maximum valued leaf
 // @return The maximum leaf or NULL
 func (r *ART) Maximum() *Leaf {
-	args := artTreeMinmaxT{
+	args := struct {
+		tree    uintptr
+		result  uintptr
+		result2 uintptr
+	}{
 		tree: uintptr(unsafe.Pointer(r)),
 	}
 	ptr := uintptr(unsafe.Pointer(&args))
@@ -378,7 +378,11 @@ func (r *ART) Maximum() *Leaf {
 // MinMax Returns the minimum and maximum valued leaf
 // @return The minimum and maximum leaf or NULL, NULL
 func (r *ART) MinMax() (*Leaf, *Leaf) {
-	args := artTreeMinmaxT{
+	args := struct {
+		tree    uintptr
+		result  uintptr
+		result2 uintptr
+	}{
 		tree: uintptr(unsafe.Pointer(r)),
 	}
 	ptr := uintptr(unsafe.Pointer(&args))

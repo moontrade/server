@@ -120,14 +120,6 @@ import (
 type BTree C.struct_btree
 type BTreeI64 C.struct_btree
 
-type btreeNewT struct {
-	elsize   uintptr
-	maxItems uintptr
-	compare  uintptr
-	udata    uintptr
-	ptr      uintptr
-}
-
 type BTreeRecordInt64 struct {
 	Key   int64
 	Value uintptr
@@ -138,7 +130,13 @@ func BTreeInt64Compare() uintptr {
 }
 
 func NewBTree(elsize, maxItems, compare, udata uintptr) *BTree {
-	args := btreeNewT{
+	args := struct {
+		elsize   uintptr
+		maxItems uintptr
+		compare  uintptr
+		udata    uintptr
+		ptr      uintptr
+	}{
 		elsize:   elsize,
 		maxItems: maxItems,
 		compare:  compare,
@@ -154,18 +152,16 @@ func (m *BTree) Free() {
 	unsafecgo.NonBlocking((*byte)(C.do_btree_free), ptr, 0)
 }
 
-type btreeSetT struct {
-	m    uintptr
-	item uintptr
-	old  uintptr
-}
-
 func (r *BTree) Set(key int64, value uintptr) uintptr {
 	item := BTreeRecordInt64{
 		Key:   key,
 		Value: value,
 	}
-	args := btreeSetT{
+	args := struct {
+		m    uintptr
+		item uintptr
+		old  uintptr
+	}{
 		m:    uintptr(unsafe.Pointer(r)),
 		item: uintptr(unsafe.Pointer(&item)),
 	}
@@ -174,19 +170,17 @@ func (r *BTree) Set(key int64, value uintptr) uintptr {
 	return args.old
 }
 
-type btreeSetHintT struct {
-	m    uintptr
-	item uintptr
-	hint uintptr
-	old  uintptr
-}
-
 func (r *BTree) SetHint(key int64, value uintptr, hint *uint64) uintptr {
 	item := BTreeRecordInt64{
 		Key:   key,
 		Value: value,
 	}
-	args := btreeSetHintT{
+	args := struct {
+		m    uintptr
+		item uintptr
+		hint uintptr
+		old  uintptr
+	}{
 		m:    uintptr(unsafe.Pointer(r)),
 		item: uintptr(unsafe.Pointer(&item)),
 		hint: uintptr(unsafe.Pointer(hint)),
@@ -196,14 +190,12 @@ func (r *BTree) SetHint(key int64, value uintptr, hint *uint64) uintptr {
 	return args.old
 }
 
-type btreeDelT struct {
-	m      uintptr
-	key    uintptr
-	result uintptr
-}
-
 func (r *BTree) Delete(key int64) uintptr {
-	args := btreeDelT{
+	args := struct {
+		m      uintptr
+		key    uintptr
+		result uintptr
+	}{
 		m:   uintptr(unsafe.Pointer(r)),
 		key: uintptr(unsafe.Pointer(&key)),
 	}
@@ -212,15 +204,13 @@ func (r *BTree) Delete(key int64) uintptr {
 	return args.result
 }
 
-type btreeDelHintT struct {
-	m      uintptr
-	key    uintptr
-	hint   uintptr
-	result uintptr
-}
-
 func (r *BTree) DeleteHint(key int64, hint *uint64) uintptr {
-	args := btreeDelHintT{
+	args := struct {
+		m      uintptr
+		key    uintptr
+		hint   uintptr
+		result uintptr
+	}{
 		m:    uintptr(unsafe.Pointer(r)),
 		key:  uintptr(unsafe.Pointer(&key)),
 		hint: uintptr(unsafe.Pointer(hint)),
@@ -230,14 +220,12 @@ func (r *BTree) DeleteHint(key int64, hint *uint64) uintptr {
 	return args.result
 }
 
-type btreeGetT struct {
-	tree   uintptr
-	key    uintptr
-	result uintptr
-}
-
 func (r *BTree) Get(key int64) uintptr {
-	args := btreeGetT{
+	args := struct {
+		tree   uintptr
+		key    uintptr
+		result uintptr
+	}{
 		tree: uintptr(unsafe.Pointer(r)),
 		key:  uintptr(unsafe.Pointer(&key)),
 	}
@@ -246,15 +234,13 @@ func (r *BTree) Get(key int64) uintptr {
 	return args.result
 }
 
-type btreeGetHintT struct {
-	tree   uintptr
-	key    uintptr
-	hint   uintptr
-	result uintptr
-}
-
 func (r *BTree) GetHint(key int64, hint *uint64) uintptr {
-	args := btreeGetHintT{
+	args := struct {
+		tree   uintptr
+		key    uintptr
+		hint   uintptr
+		result uintptr
+	}{
 		tree: uintptr(unsafe.Pointer(r)),
 		key:  uintptr(unsafe.Pointer(&key)),
 		hint: uintptr(unsafe.Pointer(hint)),

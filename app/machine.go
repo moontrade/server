@@ -149,6 +149,14 @@ func (m *machine) Context() interface{} {
 	return nil
 }
 
+func (m *machine) ApplyBatch(logs []*raft.Log) []interface{} {
+	responses := make([]interface{}, len(logs))
+	for i, l := range logs {
+		responses[i] = m.Apply(l)
+	}
+	return responses
+}
+
 func (m *machine) Apply(l *raft.Log) interface{} {
 	packet, err := snappy.Decode(nil, l.Data)
 	if err != nil {
