@@ -3,241 +3,203 @@ package nosql
 import "github.com/moontrade/mdbx-go"
 
 type Index interface {
-	GetName() string
+	ID() uint32
 
-	Insert(tx *mdbx.Tx, id DocID, document string) error
+	Owner() CollectionID
 
-	Update(tx *mdbx.Tx, id DocID, document string) (bool, error)
+	Name() string
 
-	Delete(tx *mdbx.Tx, id DocID, document string) (bool, error)
+	insert(tx *mdbx.Tx, id DocID, document string) error
+
+	update(tx *mdbx.Tx, id DocID, document string) (bool, error)
+
+	delete(tx *mdbx.Tx, id DocID, document string) (bool, error)
 }
 
 type indexBase struct {
-	Name string
+	meta  indexMeta
+	store *indexStore
+}
+
+type indexMeta struct {
+	Name     string       `json:"name"`
+	Selector string       `json:"selector"`
+	DBI      mdbx.DBI     `json:"dbi"`
+	State    int32        `json:"state"`
+	ID       uint32       `json:"id"`
+	Owner    CollectionID `json:"owner"`
+	Kind     IndexKind    `json:"kind"`
+	Unique   bool         `json:"unique"`
+	Array    bool         `json:"array"`
+}
+
+type indexStore struct {
+	store *Store
+	count uint64
+	bytes uint64
+}
+
+func (isb *indexBase) Name() string {
+	return isb.meta.Name
+}
+
+func (isb *indexBase) ID() uint32 {
+	return isb.meta.ID
+}
+
+func (isb *indexBase) Owner() CollectionID {
+	return isb.meta.Owner
 }
 
 type String struct {
 	indexBase
-	*stringStore
-	Get func(doc string, into []byte) (result []byte, err error)
+	Value func(doc string, into []byte) (result []byte, err error)
 }
 
-type UniqueString struct {
+func (is *String) insert(tx *mdbx.Tx, id DocID, document string) error {
+	return nil
+}
+
+func (is *String) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+func (is *String) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+type StringUnique struct {
 	indexBase
-	*uniqueStringStore
-	Get func(doc string, into []byte) (result []byte, err error)
+	Value func(doc string, into []byte) (result []byte, err error)
+}
+
+func (is *StringUnique) insert(tx *mdbx.Tx, id DocID, document string) error {
+	return nil
+}
+
+func (is *StringUnique) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+func (is *StringUnique) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
 }
 
 type StringArray struct {
 	indexBase
-	*stringArrayStore
-	Get func(doc string, into []string) (result []string, err error)
+	Value func(doc string, into []string) (result []string, err error)
+}
+
+func (is *StringArray) insert(tx *mdbx.Tx, id DocID, document string) error {
+	return nil
+}
+
+func (is *StringArray) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+func (is *StringArray) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
 }
 
 type Int64 struct {
 	indexBase
-	*int64Store
-	Get func(data string) (int64, error)
+	Value func(data string) (int64, error)
+}
+
+func (is *Int64) insert(tx *mdbx.Tx, id DocID, document string) error {
+	return nil
+}
+
+func (is *Int64) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+func (is *Int64) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
 }
 
 type Int64Array struct {
 	indexBase
-	*int64ArrayStore
-	Get func(data string, into []int64) ([]int64, error)
+	Value func(data string, into []int64) ([]int64, error)
 }
 
-type UniqueInt64 struct {
-	indexBase
-	*uniqueInt64Store
+func (is *Int64Array) insert(tx *mdbx.Tx, id DocID, document string) error {
+	return nil
+}
 
-	Get func(data string) (int64, error)
+func (is *Int64Array) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+func (is *Int64Array) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+type Int64Unique struct {
+	indexBase
+	Value func(data string) (int64, error)
+}
+
+func (is *Int64Unique) insert(tx *mdbx.Tx, id DocID, document string) error {
+	return nil
+}
+
+func (is *Int64Unique) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+func (is *Int64Unique) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
 }
 
 type Float64 struct {
 	indexBase
-	*float64Store
-	Get func(data string) (float64, error)
+	Value func(data string) (float64, error)
+}
+
+func (is *Float64) insert(tx *mdbx.Tx, id DocID, document string) error {
+	return nil
+}
+
+func (is *Float64) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+func (is *Float64) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
 }
 
 type Float64Array struct {
 	indexBase
-	*float64ArrayStore
-
-	Get func(data string, into []float64) ([]float64, error)
+	Value func(data string, into []float64) ([]float64, error)
 }
 
-type UniqueFloat64 struct {
+func (is *Float64Array) insert(tx *mdbx.Tx, id DocID, document string) error {
+	return nil
+}
+
+func (is *Float64Array) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+func (is *Float64Array) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+	return false, nil
+}
+
+type Float64Unique struct {
 	indexBase
-	*uniqueFloat64Store
-	Get func(data string) (float64, error)
+	Value func(data string) (float64, error)
 }
 
-type indexStoreBase struct {
-	name       string
-	kind       IndexKind
-	unique     bool
-	array      bool
-	selector   string
-	store      *Store
-	collection *Collection
-	dbi        mdbx.DBI
-	state      int32
-	id         CollectionID
-}
-
-func (isb *indexStoreBase) GetName() string {
-	return isb.name
-}
-
-type int64Store struct {
-	indexStoreBase
-	get func(doc string) (result int64, err error)
-}
-
-func (is *int64Store) Insert(tx *mdbx.Tx, id DocID, document string) error {
+func (is *Float64Unique) insert(tx *mdbx.Tx, id DocID, document string) error {
 	return nil
 }
 
-func (is *int64Store) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+func (is *Float64Unique) update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
 	return false, nil
 }
 
-func (is *int64Store) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-type uniqueInt64Store struct {
-	indexStoreBase
-	get func(doc string) (result int64, err error)
-}
-
-func (is *uniqueInt64Store) Insert(tx *mdbx.Tx, id DocID, document string) error {
-	return nil
-}
-
-func (is *uniqueInt64Store) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-func (is *uniqueInt64Store) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-type int64ArrayStore struct {
-	indexStoreBase
-	get func(doc string, into []int64) (result []int64, err error)
-}
-
-func (is *int64ArrayStore) Insert(tx *mdbx.Tx, id DocID, document string) error {
-	return nil
-}
-
-func (is *int64ArrayStore) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-func (is *int64ArrayStore) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-type float64Store struct {
-	indexStoreBase
-	get func(doc string) (result float64, err error)
-}
-
-func (is *float64Store) Insert(tx *mdbx.Tx, id DocID, document string) error {
-	return nil
-}
-
-func (is *float64Store) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-func (is *float64Store) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-type uniqueFloat64Store struct {
-	indexStoreBase
-	get func(doc string) (result float64, err error)
-}
-
-func (is *uniqueFloat64Store) Insert(tx *mdbx.Tx, id DocID, document string) error {
-	return nil
-}
-
-func (is *uniqueFloat64Store) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-func (is *uniqueFloat64Store) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-type float64ArrayStore struct {
-	indexStoreBase
-	get func(doc string, into []float64) (result []float64, err error)
-}
-
-func (is *float64ArrayStore) Insert(tx *mdbx.Tx, id DocID, document string) error {
-	return nil
-}
-
-func (is *float64ArrayStore) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-func (is *float64ArrayStore) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-type stringStore struct {
-	indexStoreBase
-	get func(doc string, into []byte) (result []byte, err error)
-}
-
-func (is *stringStore) Insert(tx *mdbx.Tx, id DocID, document string) error {
-	return nil
-}
-
-func (is *stringStore) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-func (is *stringStore) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-type uniqueStringStore struct {
-	indexStoreBase
-	get func(doc string, into []byte) (result []byte, err error)
-}
-
-func (is *uniqueStringStore) Insert(tx *mdbx.Tx, id DocID, document string) error {
-	return nil
-}
-
-func (is *uniqueStringStore) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-func (is *uniqueStringStore) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-type stringArrayStore struct {
-	indexStoreBase
-	get func(doc string, into []string) (result []string, err error)
-}
-
-func (is *stringArrayStore) Insert(tx *mdbx.Tx, id DocID, document string) error {
-	return nil
-}
-
-func (is *stringArrayStore) Update(tx *mdbx.Tx, id DocID, document string) (bool, error) {
-	return false, nil
-}
-
-func (is *stringArrayStore) Delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
+func (is *Float64Unique) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
 	return false, nil
 }

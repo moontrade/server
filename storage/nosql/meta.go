@@ -7,6 +7,8 @@ import (
 const (
 	StoreName = "nosql"
 	Version   = "0.1.0"
+
+	mainSchema = ""
 )
 
 type storeRecord struct {
@@ -15,36 +17,34 @@ type storeRecord struct {
 }
 
 const (
-	metaRecordKindJsonCollection      = 1
-	metaRecordKindJsonCollectionIndex = 2
+	metaRecordKindCollection = 1
+	metaRecordKindIndex      = 2
 )
-
-const (
-	dbiCollectionU64 = 1
-	dbiIndexU64      = 2
-	dbiIndex         = 2
-)
-
-type metaRecord struct {
-	name        string   `json:"n,omitempty"`
-	version     string   `json:"v,omitempty"`
-	description string   `json:"d,omitempty"`
-	schema      string   `json:"s,omitempty"`
-	kind        int      `json:"k,omitempty"`
-	dbi         int      `json:"dbi"`
-	children    []uint16 `json:"c,omitempty"`
-	parent      uint16   `json:"p,omitempty"`
-	size        uint32   `json:"sz,omitempty"`
-	fixedSize   uint32   `json:"fsz,omitempty"`
-	count       uint32   `json:"cnt,omitempty"`
-}
 
 type meta struct {
 	store       *Store
 	collections []*collectionStore
 }
 
-func loadMeta(s *Store, schema *Schema) (*meta, error) {
+type schemaMeta struct {
+	Name     string `json:"name"`
+	Pkg      string `json:"pkg"`
+	FQN      string `json:"fqn"`
+	Checksum uint64 `json:"checksum"`
+}
+
+type collectionMeta struct {
+	Id       uint16         `json:"id"`
+	Created  uint64         `json:"c"`
+	Updated  uint64         `json:"u"`
+	Schema   int32          `json:"s"`
+	Kind     CollectionKind `json:"k"`
+	Name     string         `json:"n"`
+	Indexes  []int32        `json:"ix"`
+	Checksum uint64         `json:"x"`
+}
+
+func loadMeta(s *Store) (*meta, error) {
 	m := &meta{store: s}
 
 	//schemaCollections := make(map[string]*Collection)

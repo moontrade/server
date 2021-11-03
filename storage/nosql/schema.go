@@ -11,13 +11,13 @@ import (
 var (
 	collectionTypeOf    = reflect.TypeOf(Collection{})
 	int64TypeOf         = reflect.TypeOf(Int64{})
-	uniqueInt64TypeOf   = reflect.TypeOf(UniqueInt64{})
+	uniqueInt64TypeOf   = reflect.TypeOf(Int64Unique{})
 	int64ArrayTypeOf    = reflect.TypeOf(Int64Array{})
 	float64TypeOf       = reflect.TypeOf(Float64{})
-	uniqueFloat64TypeOf = reflect.TypeOf(UniqueFloat64{})
+	uniqueFloat64TypeOf = reflect.TypeOf(Float64Unique{})
 	float64ArrayTypeOf  = reflect.TypeOf(Float64Array{})
 	stringTypeOf        = reflect.TypeOf(String{})
-	uniqueStringTypeOf  = reflect.TypeOf(UniqueString{})
+	uniqueStringTypeOf  = reflect.TypeOf(StringUnique{})
 	stringArrayTypeOf   = reflect.TypeOf(StringArray{})
 
 	errNotCollectionType = errors.New("not collection type")
@@ -25,24 +25,35 @@ var (
 )
 
 type Schema struct {
+	meta          *schemaMeta
 	Collections   []Collection
 	CollectionMap map[string]Collection
 }
 
-func Load(prototype interface{}) (*Schema, error) {
+func fqn(t reflect.Type) string {
+	pkg := t.PkgPath()
+	if len(pkg) == 0 {
+		return t.Name()
+	}
+	return fmt.Sprintf("%s.%s", pkg, t.Name())
+}
+
+func Load(name string, prototype interface{}) (*Schema, error) {
 	val := reflect.ValueOf(prototype)
-	for val.Kind() == reflect.Ptr {
+	if val.Kind() == reflect.Ptr {
 		val = val.Elem()
 	}
 	t := val.Type()
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
 	if t.Kind() != reflect.Struct {
 		return nil, errors.New("not struct")
 	}
 
 	schema := &Schema{
+		meta: &schemaMeta{
+			Name: t.Name(),
+			Pkg:  t.PkgPath(),
+			FQN:  fqn(t),
+		},
 		Collections:   make([]Collection, 0, 16),
 		CollectionMap: make(map[string]Collection),
 	}
@@ -176,7 +187,7 @@ indexLoop:
 				col.indexMap = make(map[string]Index)
 			}
 			col.indexes = append(col.indexes, index)
-			indexName := index.GetName()
+			indexName := index.Name()
 			existing := col.indexMap[indexName]
 			if existing != nil {
 				return col, fmt.Errorf("%s.%s duplicate index named %s", col.Name, fieldType.Name, indexName)
@@ -201,174 +212,153 @@ func parseIndex(
 	selector := field.Tag.Get("@")
 
 	if fieldType.AssignableTo(int64TypeOf) {
-		indexCast := val.Interface().(Int64)
-		index := Int64{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &Int64{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindInt64,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonInt64(selector)
+		if index.Value == nil {
+			index.Value = jsonInt64(selector)
 		}
-		index.int64Store = &int64Store{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeInt64,
-			unique: false,
-			array:  false,
-		}, get: index.Get}
+		*(*Int64)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	if fieldType.AssignableTo(uniqueInt64TypeOf) {
-		indexCast := val.Interface().(UniqueInt64)
-		index := UniqueInt64{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &Int64Unique{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindInt64,
+					Unique:   true,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonInt64(selector)
+		if index.Value == nil {
+			index.Value = jsonInt64(selector)
 		}
-		index.uniqueInt64Store = &uniqueInt64Store{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeInt64,
-			unique: true,
-			array:  false,
-		}, get: index.Get}
+		*(*Int64Unique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	if fieldType.AssignableTo(int64ArrayTypeOf) {
-		indexCast := val.Interface().(Int64Array)
-		index := Int64Array{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &Int64Array{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindInt64,
+					Array:    true,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonInt64Array(selector)
+		if index.Value == nil {
+			index.Value = jsonInt64Array(selector)
 		}
-		index.int64ArrayStore = &int64ArrayStore{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeInt64,
-			unique: false,
-			array:  true,
-		}, get: index.Get}
+		*(*Int64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	if fieldType.AssignableTo(float64TypeOf) {
-		indexCast := val.Interface().(Float64)
-		index := Float64{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &Float64{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindFloat64,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonFloat64(selector)
+		if index.Value == nil {
+			index.Value = jsonFloat64(selector)
 		}
-		index.float64Store = &float64Store{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeFloat64,
-			unique: false,
-			array:  false,
-		}, get: index.Get}
+		*(*Float64)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	if fieldType.AssignableTo(uniqueFloat64TypeOf) {
-		indexCast := val.Interface().(UniqueFloat64)
-		index := UniqueFloat64{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &Float64Unique{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindFloat64,
+					Unique:   true,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonFloat64(selector)
+		if index.Value == nil {
+			index.Value = jsonFloat64(selector)
 		}
-		index.uniqueFloat64Store = &uniqueFloat64Store{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeFloat64,
-			unique: true,
-			array:  false,
-		}, get: index.Get}
+		*(*Float64Unique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	if fieldType.AssignableTo(float64ArrayTypeOf) {
-		indexCast := val.Interface().(Float64Array)
-		index := Float64Array{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &Float64Array{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindFloat64,
+					Array:    true,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonFloat64Array(selector)
+		if index.Value == nil {
+			index.Value = jsonFloat64Array(selector)
 		}
-		index.float64ArrayStore = &float64ArrayStore{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeFloat64,
-			unique: false,
-			array:  true,
-		}, get: index.Get}
+		*(*Float64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	if fieldType.AssignableTo(stringTypeOf) {
-		indexCast := val.Interface().(String)
-		index := String{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &String{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindString,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonString(selector)
+		if index.Value == nil {
+			index.Value = jsonString(selector)
 		}
-		index.stringStore = &stringStore{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeString,
-			unique: false,
-			array:  false,
-		}, get: index.Get}
+		*(*String)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	if fieldType.AssignableTo(uniqueStringTypeOf) {
-		indexCast := val.Interface().(UniqueString)
-		index := UniqueString{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &StringUnique{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindString,
+					Unique:   true,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonString(selector)
+		if index.Value == nil {
+			index.Value = jsonString(selector)
 		}
-		index.uniqueStringStore = &uniqueStringStore{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeString,
-			unique: true,
-			array:  false,
-		}, get: index.Get}
+		*(*StringUnique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	if fieldType.AssignableTo(stringArrayTypeOf) {
-		indexCast := val.Interface().(StringArray)
-		index := StringArray{}
-		index.Name = indexCast.Name
-		index.Get = indexCast.Get
-		if len(index.Name) == 0 {
-			index.Name = name
+		index := &StringArray{
+			indexBase: indexBase{
+				store: &indexStore{},
+				meta: indexMeta{
+					Name:     name,
+					Selector: selector,
+					Kind:     IndexKindString,
+					Array:    true,
+				}},
 		}
-		if index.Get == nil {
-			index.Get = jsonStringArray(selector)
+		if index.Value == nil {
+			index.Value = jsonStringArray(selector)
 		}
-		index.stringArrayStore = &stringArrayStore{indexStoreBase: indexStoreBase{
-			name:   name,
-			kind:   IndexTypeString,
-			unique: false,
-			array:  true,
-		}, get: index.Get}
+		*(*StringArray)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}
 	return nil, errNotIndexType
@@ -383,7 +373,8 @@ func deref(t reflect.Type) reflect.Type {
 
 func isLower(c byte) bool {
 	switch c {
-	case 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z':
+	case 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+		'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z':
 		return true
 	}
 	return false
@@ -391,7 +382,8 @@ func isLower(c byte) bool {
 
 func isUpper(c byte) bool {
 	switch c {
-	case 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z':
+	case 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+		'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z':
 		return true
 	}
 	return false

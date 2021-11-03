@@ -34,23 +34,24 @@ func NewRecordID(collection CollectionID, id uint64) DocID {
 	return DocID(id)
 }
 
-type CollectionType int
+type CollectionKind int
 
 const (
-	CollectionTypeCustom   CollectionType = 0
-	CollectionTypeJson     CollectionType = 1
-	CollectionTypeProto    CollectionType = 2
-	CollectionTypeProtobuf CollectionType = 3
+	CollectionTypeCustom   CollectionKind = 0
+	CollectionTypeJson     CollectionKind = 1
+	CollectionTypeProto    CollectionKind = 2
+	CollectionTypeProtobuf CollectionKind = 3
 )
 
 type IndexKind int
 
 const (
-	IndexTypeU48     IndexKind = 1 // 48-bit indexes are stored in collections db.
-	IndexTypeInt64   IndexKind = 2 // 64-bit indexes are stored in indexes db.
-	IndexTypeFloat64 IndexKind = 3
-	IndexTypeString  IndexKind = 4
-	//IndexTypeSpatial IndexKind = 5
+	IndexKindUnknown   IndexKind = 0
+	IndexKindInt64     IndexKind = 1
+	IndexKindFloat64   IndexKind = 2
+	IndexKindString    IndexKind = 3
+	IndexKindComposite IndexKind = 10
+	//IndexTypeSpatial IndexKind = 11
 )
 
 type GetValue func(doc string, into []byte) (result []byte, err error)
@@ -66,20 +67,20 @@ func NewCollection(name string) *Collection {
 
 type schemaStore struct {
 	collections map[string]*collectionStore
-	indexes     map[string]*stringStore
 }
 
 type collectionStore struct {
-	Type     reflect.Type
-	name     string
-	indexMap map[string]Index
-	indexes  []Index
-	store    *Store
-	id       CollectionID
-	minID    DocID
-	maxID    DocID
-	sequence uint64
-	format   Format
+	Type       reflect.Type
+	name       string
+	store      *Store
+	indexes    []Index
+	indexMap   map[string]Index
+	id         CollectionID
+	minID      DocID
+	maxID      DocID
+	sequence   uint64
+	bytes      uint64
+	indexBytes uint64
 }
 
 type Cursor struct {
@@ -115,7 +116,7 @@ func (s *collectionStore) Insert(tx *mdbx.Tx, data []byte) (DocID, error) {
 	// Insert indexes
 	if len(s.indexes) > 0 {
 		for _, index := range s.indexes {
-			if err = index.Insert(tx, k, d); err != nil {
+			if err = index.insert(tx, k, d); err != nil {
 				return 0, err
 			}
 		}
@@ -136,7 +137,7 @@ func (s *collectionStore) Update(tx *mdbx.Tx, id DocID, data []byte) error {
 	// Update indexes
 	if len(s.indexes) > 0 {
 		for _, index := range s.indexes {
-			if _, err = index.Update(tx, id, d); err != nil {
+			if _, err = index.update(tx, id, d); err != nil {
 				return err
 			}
 		}
@@ -161,7 +162,7 @@ func (s *collectionStore) Delete(tx *mdbx.Tx, id DocID) (bool, error) {
 		data := val.Unsafe()
 		d := *(*string)(unsafe.Pointer(&data))
 		for _, index := range s.indexes {
-			if _, err = index.Delete(tx, id, d); err != nil {
+			if _, err = index.delete(tx, id, d); err != nil {
 				return false, err
 			}
 		}
@@ -186,7 +187,7 @@ func (s *collectionStore) DeleteGet(tx *mdbx.Tx, id DocID, onData func(data mdbx
 		data := val.Unsafe()
 		d := *(*string)(unsafe.Pointer(&data))
 		for _, index := range s.indexes {
-			if _, err = index.Delete(tx, id, d); err != nil {
+			if _, err = index.delete(tx, id, d); err != nil {
 				return false, err
 			}
 		}
