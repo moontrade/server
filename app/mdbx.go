@@ -173,7 +173,7 @@ func (s *Store) Close() error {
 		e := s.stableStore.Close()
 		if err != nil {
 			if e != nil {
-				return e
+				return err
 			}
 			return err
 		} else if e != nil {
@@ -409,7 +409,10 @@ func (s *Store) LastIndex() (uint64, error) {
 func (s *Store) GetLog(index uint64, log *raft.Log) error {
 	if err := s.logStore.View(func(tx *mdbx.Tx) error {
 		var (
-			key = mdbx.U64(&index)
+			key = mdbx.Val{
+				Base: (*byte)(unsafe.Pointer(&index)),
+				Len:  8,
+			}
 			val = mdbx.Val{}
 		)
 
@@ -437,18 +440,21 @@ func (s *Store) GetLog(index uint64, log *raft.Log) error {
 func (s *Store) StoreLog(log *raft.Log) error {
 	if err := s.logStore.Update(func(tx *mdbx.Tx) error {
 		var (
-			key  = mdbx.U64(&log.Index)
-			data = mdbx.Val{
+			k = mdbx.Val{
+				Base: (*byte)(unsafe.Pointer(&log.Index)),
+				Len:  8,
+			}
+			v = mdbx.Val{
 				Len: uint64(SerializedSize(log)),
 			}
 		)
 
 		// PutReserve to save a Go allocation.
-		if e := tx.Put(s.logDBI, &key, &data, mdbx.PutReserve|mdbx.PutAppend); e != mdbx.ErrSuccess {
+		if e := tx.Put(s.logDBI, &k, &v, mdbx.PutReserve|mdbx.PutAppend); e != mdbx.ErrSuccess {
 			return e
 		}
 		// Marshal directly into MDBX managed buffer which will be saved once committed.
-		if _, err := MarshalLog(log, data.Unsafe()); err != nil {
+		if _, err := MarshalLog(log, v.Unsafe()); err != nil {
 			return err
 		}
 		return nil
@@ -478,17 +484,20 @@ func (s *Store) StoreLogs(logs []*raft.Log) error {
 
 		for _, log := range logs {
 			var (
-				key  = mdbx.U64(&log.Index)
-				data = mdbx.Val{
+				k = mdbx.Val{
+					Base: (*byte)(unsafe.Pointer(&log.Index)),
+					Len:  8,
+				}
+				v = mdbx.Val{
 					Len: uint64(SerializedSize(log)),
 				}
 			)
 
 			// PutReserve to save a Go allocation.
-			if err = cursor.Put(&key, &data, mdbx.PutReserve|mdbx.PutAppend); e != mdbx.ErrSuccess {
+			if err = cursor.Put(&k, &v, mdbx.PutReserve|mdbx.PutAppend); e != mdbx.ErrSuccess {
 				return err
 			}
-			if _, err = MarshalLog(log, data.Unsafe()); err != nil {
+			if _, err = MarshalLog(log, v.Unsafe()); err != nil {
 				return err
 			}
 		}
@@ -513,12 +522,15 @@ func (s *Store) DeleteRange(min, max uint64) error {
 
 		for index := min; index <= max; index++ {
 			var (
-				key  = mdbx.U64(&index)
-				data = mdbx.Val{}
+				k = mdbx.Val{
+					Base: (*byte)(unsafe.Pointer(&index)),
+					Len:  8,
+				}
+				v = mdbx.Val{}
 			)
 
 			// PutReserve to save a Go allocation.
-			if err = cursor.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+			if err = cursor.Get(&k, &v, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
 				if err == mdbx.ErrNotFound {
 					// TODO: Is this correct?
 					return nil

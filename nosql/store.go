@@ -62,7 +62,7 @@ func Open(config *Config) (*Store, error) {
 	if s.store, err = mdbx.Open(config.Path, config.Flags, config.Mode,
 		func(env *mdbx.Env, create bool) error {
 			//if create {
-			if e := env.SetMaxDBS(5); e != mdbx.ErrSuccess {
+			if e := env.SetMaxDBS(4); e != mdbx.ErrSuccess {
 				return e
 			}
 			// Set geometry
