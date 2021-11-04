@@ -17,20 +17,39 @@ type Index interface {
 }
 
 type indexBase struct {
-	meta  indexMeta
+	meta  IndexMeta
 	store *indexStore
 }
 
-type indexMeta struct {
-	Name     string       `json:"name"`
-	Selector string       `json:"selector"`
-	DBI      mdbx.DBI     `json:"dbi"`
-	State    int32        `json:"state"`
-	ID       uint32       `json:"id"`
-	Owner    CollectionID `json:"owner"`
-	Kind     IndexKind    `json:"kind"`
-	Unique   bool         `json:"unique"`
-	Array    bool         `json:"array"`
+type IndexMeta struct {
+	indexDescriptor
+	Owner CollectionID `json:"owner"`
+	DBI   mdbx.DBI     `json:"dbi"`
+	State int32        `json:"state"`
+}
+
+type indexDescriptor struct {
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Selector    string    `json:"selector"`
+	ID          uint32    `json:"id"`
+	Kind        IndexKind `json:"kind"`
+	Unique      bool      `json:"unique"`
+	Array       bool      `json:"array"`
+	Version     int32     `json:"version"`
+}
+
+func (im *IndexMeta) Equals(other *IndexMeta) bool {
+	if im == nil {
+		if other == nil {
+			return true
+		}
+		return false
+	}
+	if other == nil {
+		return false
+	}
+	return im.indexDescriptor == other.indexDescriptor
 }
 
 type indexStore struct {

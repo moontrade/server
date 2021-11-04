@@ -2,7 +2,7 @@
 // +build !tinygo
 // +build amd64 arm64
 
-package index
+package tree
 
 /*
 #cgo LDFLAGS: -L. -lstdc++

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"unsafe"
 )
 
@@ -22,15 +23,32 @@ var (
 
 	errNotCollectionType = errors.New("not collection type")
 	errNotIndexType      = errors.New("not index type")
+
+	ErrAlreadyLoaded   = errors.New("already loaded")
+	ErrCollectionStore = errors.New("collection store not exist")
 )
 
+// Schema provides a flat list of named Collections and their indexes.
+// It does NOT describe the schema of documents.
 type Schema struct {
-	meta          *schemaMeta
+	Meta          SchemaMeta
 	Collections   []Collection
 	CollectionMap map[string]Collection
+	store         *Store
+	mu            sync.Mutex
 }
 
-func fqn(t reflect.Type) string {
+type SchemaMeta struct {
+	Id          int32            `json:"id"`
+	UID         string           `json:"uid"`
+	Name        string           `json:"name"`
+	Pkg         string           `json:"pkg"`
+	FQN         string           `json:"fqn"`
+	Checksum    uint64           `json:"checksum"`
+	Collections []CollectionMeta `json:"collections"`
+}
+
+func fqnOf(t reflect.Type) string {
 	pkg := t.PkgPath()
 	if len(pkg) == 0 {
 		return t.Name()
@@ -38,7 +56,23 @@ func fqn(t reflect.Type) string {
 	return fmt.Sprintf("%s.%s", pkg, t.Name())
 }
 
-func Load(name string, prototype interface{}) (*Schema, error) {
+func (s *Store) LoadSchema(schema *Schema) error {
+	schema.mu.Lock()
+	defer schema.mu.Unlock()
+	if schema.store != nil {
+		if schema.store != s {
+			return ErrAlreadyLoaded
+		}
+		return nil
+	}
+	return nil
+}
+
+func ParseSchema(prototype interface{}) (*Schema, error) {
+	return ParseSchemaWithUID("", prototype)
+}
+
+func ParseSchemaWithUID(uid string, prototype interface{}) (*Schema, error) {
 	val := reflect.ValueOf(prototype)
 	if val.Kind() == reflect.Ptr {
 		val = val.Elem()
@@ -48,11 +82,19 @@ func Load(name string, prototype interface{}) (*Schema, error) {
 		return nil, errors.New("not struct")
 	}
 
+	fqn := fqnOf(t)
+	if len(uid) == 0 {
+		uid = fqn
+	} else if uid == "@" {
+		uid = ""
+	}
+
 	schema := &Schema{
-		meta: &schemaMeta{
+		Meta: SchemaMeta{
+			UID:  uid,
 			Name: t.Name(),
 			Pkg:  t.PkgPath(),
-			FQN:  fqn(t),
+			FQN:  fqn,
 		},
 		Collections:   make([]Collection, 0, 16),
 		CollectionMap: make(map[string]Collection),
@@ -134,10 +176,9 @@ collectionLoop:
 				}
 			}
 			if len(col.Name) == 0 {
-				col.Name = strings.ToLower(t.Name())
+				col.Name = snakeCase(t.Name())
 			}
 
-			col.name = col.Name
 			break collectionLoop
 		}
 	}
@@ -165,7 +206,7 @@ indexLoop:
 			if len(fieldType.Name) == 0 {
 				continue indexLoop
 			}
-			if !isUpper(fieldType.Name[0]) {
+			if !isUpperChar(fieldType.Name[0]) {
 				continue indexLoop
 			}
 			ct := fieldType.Type
@@ -215,11 +256,11 @@ func parseIndex(
 		index := &Int64{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindInt64,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonInt64(selector)
@@ -231,12 +272,12 @@ func parseIndex(
 		index := &Int64Unique{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindInt64,
 					Unique:   true,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonInt64(selector)
@@ -248,12 +289,12 @@ func parseIndex(
 		index := &Int64Array{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindInt64,
 					Array:    true,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonInt64Array(selector)
@@ -265,11 +306,11 @@ func parseIndex(
 		index := &Float64{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindFloat64,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonFloat64(selector)
@@ -281,12 +322,12 @@ func parseIndex(
 		index := &Float64Unique{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindFloat64,
 					Unique:   true,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonFloat64(selector)
@@ -298,12 +339,12 @@ func parseIndex(
 		index := &Float64Array{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindFloat64,
 					Array:    true,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonFloat64Array(selector)
@@ -315,11 +356,11 @@ func parseIndex(
 		index := &String{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindString,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonString(selector)
@@ -331,12 +372,12 @@ func parseIndex(
 		index := &StringUnique{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindString,
 					Unique:   true,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonString(selector)
@@ -348,12 +389,12 @@ func parseIndex(
 		index := &StringArray{
 			indexBase: indexBase{
 				store: &indexStore{},
-				meta: indexMeta{
+				meta: IndexMeta{indexDescriptor: indexDescriptor{
 					Name:     name,
 					Selector: selector,
 					Kind:     IndexKindString,
 					Array:    true,
-				}},
+				}}},
 		}
 		if index.Value == nil {
 			index.Value = jsonStringArray(selector)
@@ -369,22 +410,4 @@ func deref(t reflect.Type) reflect.Type {
 		t = t.Elem()
 	}
 	return t
-}
-
-func isLower(c byte) bool {
-	switch c {
-	case 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
-		'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z':
-		return true
-	}
-	return false
-}
-
-func isUpper(c byte) bool {
-	switch c {
-	case 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
-		'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z':
-		return true
-	}
-	return false
 }

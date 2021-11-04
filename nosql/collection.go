@@ -61,17 +61,20 @@ type Collection struct {
 	Name string
 }
 
-func NewCollection(name string) *Collection {
-	return &Collection{Name: name, collectionStore: &collectionStore{name: name}}
-}
-
-type schemaStore struct {
-	collections map[string]*collectionStore
+type CollectionMeta struct {
+	Name     string         `json:"name"`
+	Created  uint64         `json:"created"`
+	Updated  uint64         `json:"updated"`
+	Schema   int32          `json:"schema"`
+	Kind     CollectionKind `json:"kind"`
+	Checksum uint64         `json:"x"`
+	Id       CollectionID   `json:"id"`
+	Indexes  []IndexMeta    `json:"indexes,omitempty"`
 }
 
 type collectionStore struct {
+	CollectionMeta
 	Type       reflect.Type
-	name       string
 	store      *Store
 	indexes    []Index
 	indexMap   map[string]Index
@@ -110,7 +113,7 @@ func (s *collectionStore) Insert(tx *mdbx.Tx, data []byte) (DocID, error) {
 		d   = *(*string)(unsafe.Pointer(&data))
 		err error
 	)
-	if err = tx.Put(s.store.collectionsDBI, &key, &val, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
+	if err = tx.Put(s.store.documentsDBI, &key, &val, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
 		return 0, err
 	}
 	// Insert indexes
@@ -131,7 +134,7 @@ func (s *collectionStore) Update(tx *mdbx.Tx, id DocID, data []byte) error {
 		d   = *(*string)(unsafe.Pointer(&data))
 		err error
 	)
-	if err := tx.Put(s.store.collectionsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
+	if err := tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
 		return err
 	}
 	// Update indexes
@@ -151,7 +154,7 @@ func (s *collectionStore) Delete(tx *mdbx.Tx, id DocID) (bool, error) {
 		val = mdbx.Val{}
 		err error
 	)
-	if err := tx.Put(s.store.collectionsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
+	if err := tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
 		if err == mdbx.ErrNotFound {
 			return false, nil
 		}
@@ -176,7 +179,7 @@ func (s *collectionStore) DeleteGet(tx *mdbx.Tx, id DocID, onData func(data mdbx
 		val = mdbx.Val{}
 		err error
 	)
-	if err := tx.Put(s.store.collectionsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
+	if err := tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
 		if err == mdbx.ErrNotFound {
 			return false, nil
 		}

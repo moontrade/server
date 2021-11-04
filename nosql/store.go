@@ -18,30 +18,33 @@ var (
 )
 
 const (
-	metaDBI        = "meta"
-	kvDBI          = "kv"
-	collectionsDBI = "col"
-	indexDBI       = "idx"
-	indexDupeDBI   = "idxdupe"
+	kvDBI        = "kv"
+	documentsDBI = "docs"
+	indexDBI     = "index"
 )
 
-// Store is a simple embedded Raft replicated noSQL database.
+var (
+	Default *Store
+)
+
+// Store is a simple embedded Raft replicated ACID noSQL database
+// built on MDBX B+Tree storage.
+//
 type Store struct {
-	config         *Config
-	store          *mdbx.Store // mdbx store
-	metaDBI        mdbx.DBI    // meta-data database describing schema
-	kvDBI          mdbx.DBI    // generic Key/Value database
-	collectionsDBI mdbx.DBI    // collections database
-	indexDBI       mdbx.DBI    // any byte slice indexes for collections
-	//indexDupDBI    mdbx.DBI    // any byte slice indexes for collections
-	schema *schemaStore
+	config       *Config
+	store        *mdbx.Store // mdbx store
+	kvDBI        mdbx.DBI    // generic Key/Value database
+	documentsDBI mdbx.DBI    // documents database
+	indexDBI     mdbx.DBI    // indexes database
+	streamDBI    mdbx.DBI    // streams database
+
+	schemas *schemasStore
 }
 
 type Config struct {
-	Path   string
-	Flags  mdbx.EnvFlags
-	Mode   os.FileMode
-	Schema *Schema
+	Path  string
+	Flags mdbx.EnvFlags
+	Mode  os.FileMode
 }
 
 func Open(config *Config) (*Store, error) {
@@ -71,16 +74,13 @@ func Open(config *Config) (*Store, error) {
 		}, func(store *mdbx.Store, create bool) error {
 			return store.Update(func(tx *mdbx.Tx) error {
 				var e mdbx.Error
-				if s.collectionsDBI, e = tx.OpenDBI(collectionsDBI, mdbx.DBCreate|mdbx.DBIntegerKey); e != mdbx.ErrSuccess {
+				if s.kvDBI, e = tx.OpenDBI(kvDBI, mdbx.DBCreate); e != mdbx.ErrSuccess {
+					return e
+				}
+				if s.documentsDBI, e = tx.OpenDBI(documentsDBI, mdbx.DBCreate|mdbx.DBIntegerKey); e != mdbx.ErrSuccess {
 					return e
 				}
 				if s.indexDBI, e = tx.OpenDBI(indexDBI, mdbx.DBCreate); e != mdbx.ErrSuccess {
-					return e
-				}
-				//if s.indexDupDBI, e = tx.OpenDBI(indexDupeDBI, mdbx.DBCreate); e != mdbx.ErrSuccess {
-				//	return e
-				//}
-				if s.kvDBI, e = tx.OpenDBI(kvDBI, mdbx.DBCreate); e != mdbx.ErrSuccess {
 					return e
 				}
 				return nil

@@ -50,7 +50,7 @@ type object struct {
 }
 
 type database struct {
-	//keys *index.ART
+	//keys *tree.ART
 	keys tinybtree.BTree // (key)->(object)
 	exps tinybtree.BTree // [exp/key]->(nil)
 }

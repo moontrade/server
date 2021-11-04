@@ -3,7 +3,7 @@
 // +build darwin linux unix
 // +build !tinygo.wasm
 
-package index
+package tree
 
 /*
 #include "art.h"

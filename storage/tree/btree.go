@@ -1,4 +1,4 @@
-package index
+package tree
 
 /*
 #cgo LDFLAGS: -L. -lstdc++

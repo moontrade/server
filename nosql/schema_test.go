@@ -12,7 +12,7 @@ var (
 )
 
 func TestSchema(t *testing.T) {
-	s, err := nosql.Load("", schema)
+	s, err := nosql.ParseSchema(schema)
 
 	if err != nil {
 		t.Fatal(err)
