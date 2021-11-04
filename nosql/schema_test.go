@@ -2,7 +2,7 @@ package nosql_test
 
 import (
 	"github.com/moontrade/mdbx-go"
-	"github.com/moontrade/server/storage/nosql"
+	"github.com/moontrade/server/nosql"
 	"testing"
 )
 
