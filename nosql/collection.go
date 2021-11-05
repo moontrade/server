@@ -62,14 +62,29 @@ type Collection struct {
 }
 
 type CollectionMeta struct {
-	Name     string         `json:"name"`
-	Created  uint64         `json:"created"`
-	Updated  uint64         `json:"updated"`
-	Schema   int32          `json:"schema"`
-	Kind     CollectionKind `json:"kind"`
-	Checksum uint64         `json:"x"`
-	Id       CollectionID   `json:"id"`
-	Indexes  []IndexMeta    `json:"indexes,omitempty"`
+	collectionDescriptor
+	Id      CollectionID `json:"id"`
+	Owner   int32        `json:"owner"`
+	Created uint64       `json:"created"`
+	Updated uint64       `json:"updated"`
+	Indexes []IndexMeta  `json:"indexes,omitempty"`
+	Schema  string       `json:"schema,omitempty"`
+}
+
+type collectionDescriptor struct {
+	Kind    CollectionKind `json:"kind"`
+	Name    string         `json:"name"`
+	Version int64          `json:"version"`
+}
+
+func (cd *collectionDescriptor) Equals(other *collectionDescriptor) bool {
+	if cd == nil {
+		return other == nil
+	}
+	return other != nil &&
+		cd.Kind == other.Kind &&
+		cd.Name == other.Name &&
+		cd.Version == other.Version
 }
 
 type collectionStore struct {
@@ -84,10 +99,11 @@ type collectionStore struct {
 	sequence   uint64
 	bytes      uint64
 	indexBytes uint64
+	loaded     bool
 }
 
 type Cursor struct {
-	c *collectionStore
+	c *indexStore
 }
 
 func docIDVal(key *DocID) mdbx.Val {

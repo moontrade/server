@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"unsafe"
@@ -36,6 +37,24 @@ type Schema struct {
 	CollectionMap map[string]Collection
 	store         *Store
 	mu            sync.Mutex
+}
+
+func (s *Schema) buildMeta() *SchemaMeta {
+	m := s.Meta
+	m.Collections = make([]CollectionMeta, len(s.Collections))
+	for i, col := range s.Collections {
+		cm := col.CollectionMeta
+		if len(col.indexes) > 0 {
+			cm.Indexes = make([]IndexMeta, len(col.indexes))
+			for ii, index := range col.indexes {
+				cm.Indexes[ii] = index.Meta()
+			}
+			sort.Sort(indexMetasSlice(cm.Indexes))
+		}
+		m.Collections[i] = cm
+	}
+	s.Meta = m
+	return &m
 }
 
 type SchemaMeta struct {
@@ -189,8 +208,10 @@ collectionLoop:
 
 indexLoop:
 	for i := 0; i < t.NumField(); i++ {
-		fieldValueType := valueType.Field(i)
-		fieldType := t.Field(i)
+		var (
+			fieldValueType = valueType.Field(i)
+			fieldType      = t.Field(i)
+		)
 		switch fieldType.Name {
 		case "Collection":
 			continue indexLoop
@@ -244,161 +265,57 @@ func parseIndex(
 	val reflect.Value,
 	field reflect.StructField,
 ) (Index, error) {
-	name := strings.TrimSpace(field.Tag.Get("name"))
+	var (
+		name     = strings.TrimSpace(field.Tag.Get("name"))
+		ft       = field.Type
+		selector = field.Tag.Get("@")
+	)
 	if len(name) == 0 {
-		name = strings.ToLower(field.Name)
+		name = snakeCase(field.Name)
 	}
-
-	fieldType := field.Type
-	selector := field.Tag.Get("@")
-
-	if fieldType.AssignableTo(int64TypeOf) {
-		index := &Int64{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindInt64,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonInt64(selector)
-		}
+	switch {
+	case ft.AssignableTo(int64TypeOf):
+		index := NewInt64(name, selector, val.Interface().(Int64).ValueOf)
 		*(*Int64)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
-	}
-	if fieldType.AssignableTo(uniqueInt64TypeOf) {
-		index := &Int64Unique{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindInt64,
-					Unique:   true,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonInt64(selector)
-		}
+
+	case ft.AssignableTo(uniqueInt64TypeOf):
+		index := NewInt64Unique(name, selector, val.Interface().(Int64Unique).ValueOf)
 		*(*Int64Unique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
-	}
-	if fieldType.AssignableTo(int64ArrayTypeOf) {
-		index := &Int64Array{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindInt64,
-					Array:    true,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonInt64Array(selector)
-		}
+
+	case ft.AssignableTo(int64ArrayTypeOf):
+		index := NewInt64Array(name, selector, val.Interface().(Int64Array).ValueOf)
 		*(*Int64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
-	}
-	if fieldType.AssignableTo(float64TypeOf) {
-		index := &Float64{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindFloat64,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonFloat64(selector)
-		}
+
+	case ft.AssignableTo(float64TypeOf):
+		index := NewFloat64(name, selector, val.Interface().(Float64).ValueOf)
 		*(*Float64)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
-	}
-	if fieldType.AssignableTo(uniqueFloat64TypeOf) {
-		index := &Float64Unique{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindFloat64,
-					Unique:   true,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonFloat64(selector)
-		}
+
+	case ft.AssignableTo(uniqueFloat64TypeOf):
+		index := NewFloat64Unique(name, selector, val.Interface().(Float64Unique).ValueOf)
 		*(*Float64Unique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
-	}
-	if fieldType.AssignableTo(float64ArrayTypeOf) {
-		index := &Float64Array{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindFloat64,
-					Array:    true,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonFloat64Array(selector)
-		}
+
+	case ft.AssignableTo(float64ArrayTypeOf):
+		index := NewFloat64Array(name, selector, val.Interface().(Float64Array).ValueOf)
 		*(*Float64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
-	}
-	if fieldType.AssignableTo(stringTypeOf) {
-		index := &String{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindString,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonString(selector)
-		}
+
+	case ft.AssignableTo(stringTypeOf):
+		index := NewString(name, selector, val.Interface().(String).ValueOf)
 		*(*String)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
-	}
-	if fieldType.AssignableTo(uniqueStringTypeOf) {
-		index := &StringUnique{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindString,
-					Unique:   true,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonString(selector)
-		}
+
+	case ft.AssignableTo(uniqueStringTypeOf):
+		index := NewStringUnique(name, selector, val.Interface().(StringUnique).ValueOf)
 		*(*StringUnique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
-	}
-	if fieldType.AssignableTo(stringArrayTypeOf) {
-		index := &StringArray{
-			indexBase: indexBase{
-				store: &indexStore{},
-				meta: IndexMeta{indexDescriptor: indexDescriptor{
-					Name:     name,
-					Selector: selector,
-					Kind:     IndexKindString,
-					Array:    true,
-				}}},
-		}
-		if index.Value == nil {
-			index.Value = jsonStringArray(selector)
-		}
+
+	case ft.AssignableTo(stringArrayTypeOf):
+		index := NewStringArray(name, selector, val.Interface().(StringArray).ValueOf)
 		*(*StringArray)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}

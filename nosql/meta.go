@@ -194,10 +194,12 @@ func loadMeta(s *Store) (*schemasStore, error) {
 	return m, nil
 }
 
+// ChangeSet is a set of ChangeActions required to perform in order to get the
+// schema consistent.
 type ChangeSet struct {
 	Started       time.Time
-	From          SchemaMeta
-	To            SchemaMeta
+	From          *SchemaMeta
+	To            *SchemaMeta
 	Creates       []*CollectionCreate
 	Drops         []*CollectionDrop
 	IndexCreates  []*IndexCreate
@@ -257,15 +259,16 @@ type IndexDrop struct {
 }
 
 func (m *schemasStore) load(parsed *Schema) (*ChangeSet, error) {
+	cs := &ChangeSet{
+		To: parsed.buildMeta(),
+	}
 	m.mu.Lock()
-	existing := m.schemasByUID[parsed.Meta.UID]
+	cs.From = m.schemasByUID[parsed.Meta.UID]
 	m.mu.Unlock()
 
-	cs := &ChangeSet{}
-
-	if existing != nil {
+	if cs.From != nil {
 		existingCollections := make(map[string]CollectionMeta)
-		for _, col := range existing.Collections {
+		for _, col := range cs.From.Collections {
 			existingCollections[col.Name] = col
 		}
 		collections := make([]*collectionStore, len(parsed.Collections))
@@ -289,10 +292,29 @@ func (m *schemasStore) load(parsed *Schema) (*ChangeSet, error) {
 
 		}
 	} else {
-		//creates := make([]*collectionStore, 0, len(parsed.Collections))
-		//drops := make([]*collectionStore, 0, len(parsed.Collections))
-		//createIndexes := make([]*indexStore, 0, len(parsed.Collections))
-		//dropIndexes := make([]*indexStore, 0, len(parsed.Collections))
+		cs.Creates = make([]*CollectionCreate, len(parsed.Collections))
+		cs.IndexCreates = make([]*IndexCreate, 0, len(parsed.Collections))
+
+		for i, col := range parsed.Collections {
+			if col.collectionStore == nil {
+				col.collectionStore = &collectionStore{
+					store: m.store,
+				}
+			}
+			col.collectionStore.store = m.store
+			cs.Creates[i] = &CollectionCreate{
+				meta:  col.CollectionMeta,
+				store: col.collectionStore,
+			}
+
+			for _, index := range col.indexes {
+				index.getStore().store = m.store
+				cs.IndexCreates = append(cs.IndexCreates, &IndexCreate{
+					meta:  index.Meta(),
+					store: index.getStore(),
+				})
+			}
+		}
 	}
 
 	return cs, nil

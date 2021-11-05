@@ -189,3 +189,23 @@ func (x uint32Slice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
 
 // Sort is a convenience method: x.Sort() calls Sort(x).
 func (x uint32Slice) Sort() { sort.Sort(x) }
+
+// collectionMetasSlice attaches the methods of Interface to []CollectionMeta, sorting in increasing order.
+type collectionMetasSlice []CollectionMeta
+
+func (x collectionMetasSlice) Len() int           { return len(x) }
+func (x collectionMetasSlice) Less(i, j int) bool { return x[i].Name < x[j].Name }
+func (x collectionMetasSlice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
+
+// Sort is a convenience method: x.Sort() calls Sort(x).
+func (x collectionMetasSlice) Sort() { sort.Sort(x) }
+
+// indexMetasSlice attaches the methods of Interface to []IndexMeta, sorting in increasing order.
+type indexMetasSlice []IndexMeta
+
+func (x indexMetasSlice) Len() int           { return len(x) }
+func (x indexMetasSlice) Less(i, j int) bool { return x[i].Name < x[j].Name }
+func (x indexMetasSlice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
+
+// Sort is a convenience method: x.Sort() calls Sort(x).
+func (x indexMetasSlice) Sort() { sort.Sort(x) }
