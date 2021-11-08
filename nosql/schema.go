@@ -58,7 +58,7 @@ func (s *Schema) buildMeta() *SchemaMeta {
 }
 
 type SchemaMeta struct {
-	Id          int32            `json:"id"`
+	Id          uint32           `json:"id"`
 	UID         string           `json:"uid"`
 	Name        string           `json:"name"`
 	Pkg         string           `json:"pkg"`

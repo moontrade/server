@@ -2,6 +2,7 @@ package nosql
 
 import (
 	"encoding/json"
+	"fmt"
 	"github.com/moontrade/mdbx-go"
 	"math"
 	"sort"
@@ -21,60 +22,111 @@ const (
 )
 
 type schemasStore struct {
-	store        *Store
-	schemas      []*SchemaMeta
-	schemasByUID map[string]*SchemaMeta
-	maxColID     CollectionID
-	maxIndexID   uint32
-	maxSchemaID  uint32
-	mu           sync.Mutex
+	store           *Store
+	schemas         []*SchemaMeta
+	schemasByUID    map[string]*SchemaMeta
+	maxCollectionId uint32
+	maxIndexID      uint32
+	maxSchemaID     uint32
+	mu              sync.Mutex
+}
+
+func (m *schemasStore) findMaxSchemaID() uint32 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.findMaxSchemaID0()
+}
+
+func (m *schemasStore) findMaxSchemaID0() uint32 {
+	if len(m.schemas) == 0 {
+		return 0
+	}
+	if len(m.schemas) == 1 {
+		m.maxSchemaID = m.schemas[0].Id
+		return m.maxSchemaID
+	}
+	max := uint32(0)
+	for _, schema := range m.schemas {
+		if schema.Id > max {
+			max = schema.Id
+		}
+	}
+	atomic.StoreUint32(&m.maxSchemaID, max)
+	return atomic.LoadUint32(&m.maxSchemaID)
 }
 
 func (m *schemasStore) nextSchemaID() uint32 {
 	return atomic.AddUint32(&m.maxSchemaID, 1)
 }
 
+func (m *schemasStore) findMaxIndexID() uint32 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.findMaxSchemaID0()
+}
+
+func (m *schemasStore) findMaxIndexID0() uint32 {
+	if len(m.schemas) == 0 {
+		return 0
+	}
+	max := uint32(0)
+	for _, schema := range m.schemas {
+		if len(schema.Collections) == 0 {
+			continue
+		}
+		for _, col := range schema.Collections {
+			if len(col.Indexes) == 0 {
+				continue
+			}
+			for _, index := range col.Indexes {
+				if index.ID > max {
+					max = index.ID
+				}
+			}
+		}
+	}
+	atomic.StoreUint32(&m.maxSchemaID, max)
+	return m.maxSchemaID
+}
+
 func (m *schemasStore) nextIndexID() uint32 {
 	return atomic.AddUint32(&m.maxIndexID, 1)
 }
 
-func (m *schemasStore) findMaxColID() CollectionID {
+func (m *schemasStore) findMaxCollectionID() CollectionID {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.findMaxColID0()
+	return m.findMaxCollectionID0()
 }
 
-func (m *schemasStore) findMaxColID0() CollectionID {
-	ids := make([]uint16, 0, 128)
+func (m *schemasStore) findMaxCollectionID0() CollectionID {
+	max := CollectionID(0)
 	for _, schema := range m.schemas {
 		for _, col := range schema.Collections {
-			ids = append(ids, uint16(col.Id))
+			if col.Id > max {
+				max = col.Id
+			}
 		}
 	}
-	if len(ids) == 0 {
-		return 0
-	}
-	sort.Sort(uint16Slice(ids))
-	m.maxColID = CollectionID(ids[len(ids)-1])
-	return m.maxColID
+	atomic.StoreUint32(&m.maxCollectionId, uint32(max))
+	return CollectionID(atomic.LoadUint32(&m.maxCollectionId))
 }
 
 func (m *schemasStore) nextCollectionID() CollectionID {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	max := m.maxColID
+	max := CollectionID(m.maxCollectionId)
 	if max == 0 {
-		max = m.findMaxColID0()
+		max = m.findMaxCollectionID0()
 	}
 	if max == 0 {
-		m.maxColID = minUserCollectionID
-		return m.maxColID
+		atomic.StoreUint32(&m.maxCollectionId, uint32(minUserCollectionID))
+		return CollectionID(atomic.LoadUint32(&m.maxCollectionId))
 	}
 	// Fast path
 	if max < 32768 {
-		m.maxColID++
-		return m.maxColID
+		return CollectionID(atomic.AddUint32(&m.maxCollectionId, 1))
 	}
 
 	// Create a sorted list of all IDs.
@@ -85,7 +137,7 @@ func (m *schemasStore) nextCollectionID() CollectionID {
 		}
 	}
 	if len(ids) == 0 {
-		m.maxColID = 1
+		m.maxCollectionId = 1
 		return 1
 	}
 	sort.Sort(uint16Slice(ids))
@@ -99,12 +151,11 @@ func (m *schemasStore) nextCollectionID() CollectionID {
 		next++
 	}
 	// Out of IDs?
-	if m.maxColID == CollectionID(uint16(math.MaxUint16)) {
+	if atomic.LoadUint32(&m.maxCollectionId) == math.MaxUint16 {
 		return 0
 	}
 	// Add a new ID
-	m.maxColID++
-	return m.maxColID
+	return CollectionID(atomic.AddUint32(&m.maxCollectionId, 1))
 }
 
 func loadMeta(s *Store) (*schemasStore, error) {
@@ -190,7 +241,9 @@ func loadMeta(s *Store) (*schemasStore, error) {
 		return nil, err
 	}
 
-	m.findMaxColID()
+	m.findMaxSchemaID()
+	m.findMaxCollectionID()
+	m.findMaxIndexID()
 	return m, nil
 }
 
@@ -204,7 +257,7 @@ type ChangeSet struct {
 	Drops         []*CollectionDrop
 	IndexCreates  []*IndexCreate
 	IndexRebuilds []*IndexCreate
-	IndexDrops    []*IndexCreate
+	IndexDrops    []*IndexDrop
 	mu            sync.Mutex
 }
 
@@ -258,12 +311,12 @@ type IndexDrop struct {
 	store *indexStore
 }
 
-func (m *schemasStore) load(parsed *Schema) (*ChangeSet, error) {
+func (m *schemasStore) load(nextSchema *Schema) (*ChangeSet, error) {
 	cs := &ChangeSet{
-		To: parsed.buildMeta(),
+		To: nextSchema.buildMeta(),
 	}
 	m.mu.Lock()
-	cs.From = m.schemasByUID[parsed.Meta.UID]
+	cs.From = m.schemasByUID[nextSchema.Meta.UID]
 	m.mu.Unlock()
 
 	if cs.From != nil {
@@ -271,31 +324,107 @@ func (m *schemasStore) load(parsed *Schema) (*ChangeSet, error) {
 		for _, col := range cs.From.Collections {
 			existingCollections[col.Name] = col
 		}
-		collections := make([]*collectionStore, len(parsed.Collections))
-		for i, col := range parsed.Collections {
+
+		nextCollections := make(map[string]*collectionStore)
+		collections := make([]*collectionStore, len(nextSchema.Collections))
+		for i, col := range nextSchema.Collections {
 			collections[i] = col.collectionStore
 			if collections[i] == nil {
 				return nil, ErrCollectionStore
 			}
+			if nextCollections[col.Name] != nil {
+				return nil, fmt.Errorf("duplicate collection name used: %s", col.Name)
+			}
+			nextCollections[col.Name] = col.collectionStore
 		}
-		//for _, col := range collections {
-		//	existingCollection, ok := existingCollections[col.Name]
-		//	if !ok {
-		//
-		//	} else {
-		//		delete(existingCollections, col.Name)
-		//	}
-		//}
 
-		// Deletes
+		for _, col := range collections {
+			existingCollection, ok := existingCollections[col.Name]
+			if !ok {
+				cs.Creates = append(cs.Creates, &CollectionCreate{
+					meta:  col.CollectionMeta,
+					store: col,
+				})
+			} else {
+				// Was anything changed on collection?
+				if !col.CollectionMeta.Equals(&existingCollection.collectionDescriptor) {
+					// NOOP
+				}
+
+				existingIndexes := make(map[string]IndexMeta)
+				for _, index := range existingCollection.Indexes {
+					existingIndexes[index.Name] = index
+				}
+				var indexCreates []*IndexCreate
+				var indexRebuilds []*IndexRebuild
+				for _, index := range col.indexes {
+					to := index.Meta()
+					from, ok := existingIndexes[index.Name()]
+					if !ok {
+						indexCreates = append(indexCreates, &IndexCreate{
+							meta:  index.Meta(),
+							store: index.getStore(),
+						})
+					} else {
+						delete(existingIndexes, index.Name())
+						to.ID = from.ID
+						if to.didChange(from) {
+							indexRebuilds = append(indexRebuilds, &IndexRebuild{
+								from:  from,
+								to:    to,
+								store: index.getStore(),
+							})
+						}
+					}
+				}
+
+				var indexDrops []*IndexDrop
+				for _, index := range existingIndexes {
+					indexDrops = append(indexDrops, &IndexDrop{
+						meta:  index,
+						store: nil,
+					})
+				}
+
+				if len(indexCreates) > 0 {
+					cs.IndexCreates = append(cs.IndexCreates, indexCreates...)
+				}
+				if len(indexDrops) > 0 {
+					cs.IndexDrops = append(cs.IndexDrops, indexDrops...)
+				}
+
+				// check for Index creates
+				// check for Index drops
+
+				// Remove from existingCollections map.
+				delete(existingCollections, col.Name)
+			}
+		}
+
+		// Anything remaining in existingCollections map needs to be dropped.
 		if len(existingCollections) > 0 {
+			for _, collection := range existingCollections {
+				cs.Drops = append(cs.Drops, &CollectionDrop{
+					meta:  collection,
+					store: nil,
+				})
 
+				// Drop all indexes
+				if len(collection.Indexes) > 0 {
+					for _, index := range collection.Indexes {
+						cs.IndexDrops = append(cs.IndexDrops, &IndexDrop{
+							meta:  index,
+							store: nil,
+						})
+					}
+				}
+			}
 		}
 	} else {
-		cs.Creates = make([]*CollectionCreate, len(parsed.Collections))
-		cs.IndexCreates = make([]*IndexCreate, 0, len(parsed.Collections))
+		cs.Creates = make([]*CollectionCreate, len(nextSchema.Collections))
+		cs.IndexCreates = make([]*IndexCreate, 0, len(nextSchema.Collections))
 
-		for i, col := range parsed.Collections {
+		for i, col := range nextSchema.Collections {
 			if col.collectionStore == nil {
 				col.collectionStore = &collectionStore{
 					store: m.store,

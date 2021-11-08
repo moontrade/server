@@ -75,17 +75,13 @@ type indexDescriptor struct {
 	Version     int32     `json:"version"`
 }
 
-func (im *IndexMeta) Equals(other *IndexMeta) bool {
-	if im == nil {
-		if other == nil {
-			return true
-		}
-		return false
-	}
-	if other == nil {
-		return false
-	}
-	return im.indexDescriptor == other.indexDescriptor
+func (im IndexMeta) didChange(other IndexMeta) bool {
+	return im.Name == other.Name &&
+		im.Selector == other.Selector &&
+		im.Kind == other.Kind &&
+		im.Unique == other.Unique &&
+		im.Array == other.Array &&
+		im.Version == other.Version
 }
 
 type indexStore struct {
@@ -472,3 +468,9 @@ func (is *StringArray) update(tx *mdbx.Tx, id DocID, document string) (bool, err
 func (is *StringArray) delete(tx *mdbx.Tx, id DocID, document string) (bool, error) {
 	return false, nil
 }
+
+////////////////////////////////////////////////////////////////////////////////////////
+// FullText
+////////////////////////////////////////////////////////////////////////////////////////
+
+type FullText struct{}
