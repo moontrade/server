@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"github.com/moontrade/server/logger"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ var (
 )
 
 const (
-	DefaultLogFlags = mdbx.EnvSyncDurable |
+	DefaultLogFlags = mdbx.EnvNoMetaSync |
 		mdbx.EnvNoTLS |
 		mdbx.EnvWriteMap |
 		mdbx.EnvLIFOReclaim |
@@ -32,6 +33,11 @@ const (
 		mdbx.EnvLIFOReclaim |
 		mdbx.EnvNoMemInit |
 		mdbx.EnvCoalesce
+
+	Kilobyte = 1024
+	Megabyte = 1024 * 1024
+	Gigabyte = Megabyte * 1024
+	Terabyte = Gigabyte * 1024
 )
 
 var (
@@ -39,20 +45,20 @@ var (
 	_ raft.StableStore = (*Store)(nil)
 
 	DefaultStableGeometry = mdbx.Geometry{
-		SizeLower:       1024 * 64,
-		SizeNow:         1024 * 8,
-		SizeUpper:       1024 * 256,
-		GrowthStep:      1024 * 64,
-		ShrinkThreshold: 1024 * 64 * 2,
-		PageSize:        4096,
+		SizeLower:       64 * Kilobyte,
+		SizeNow:         8 * Kilobyte,
+		SizeUpper:       256 * Kilobyte,
+		GrowthStep:      64 * Kilobyte,
+		ShrinkThreshold: 128 * Kilobyte,
+		PageSize:        4 * Kilobyte,
 	}
 	DefaultLogGeometry = mdbx.Geometry{
-		SizeLower:       1024 * 1024,
-		SizeNow:         1024 * 1024,
-		SizeUpper:       1024 * 1024 * 1024 * 16,
-		GrowthStep:      1024 * 1024 * 4,
-		ShrinkThreshold: 1024 * 1024 * 4 * 2,
-		PageSize:        16384,
+		SizeLower:       1 * Megabyte,
+		SizeNow:         1 * Megabyte,
+		SizeUpper:       4 * Gigabyte,
+		GrowthStep:      16 * Megabyte,
+		ShrinkThreshold: 8 * Megabyte,
+		PageSize:        8 * Kilobyte,
 	}
 )
 
@@ -157,16 +163,6 @@ func OpenStore(path string, logFlags, stableFlags mdbx.EnvFlags, mode os.FileMod
 	return s, nil
 }
 
-func bytesToVal(b []byte) mdbx.Val {
-	if b == nil {
-		return mdbx.Val{}
-	}
-	return mdbx.Val{
-		Base: &b[0],
-		Len:  uint64(len(b)),
-	}
-}
-
 func (s *Store) Close() error {
 	err := s.logStore.Close()
 	if s.stableStore != s.logStore {
@@ -222,7 +218,7 @@ func (s *Store) loadFirstAndLastIndex() error {
 func (s *Store) loadStableStore() error {
 	return s.stableStore.View(func(tx *mdbx.Tx) error {
 		var (
-			key  = mdbx.StringConstVal(keyCurrentTerm)
+			key  = mdbx.StringConst(keyCurrentTerm)
 			data = mdbx.Val{}
 		)
 
@@ -234,7 +230,7 @@ func (s *Store) loadStableStore() error {
 			atomic.StoreUint64(&s.currentTerm, *(*uint64)(unsafe.Pointer(data.Base)))
 		}
 
-		key = mdbx.StringConstVal(keyLastVoteTerm)
+		key = mdbx.StringConst(keyLastVoteTerm)
 		if err := tx.Get(s.stableDBI, &key, &data); err != mdbx.ErrSuccess {
 			if err != mdbx.ErrNotFound {
 				return err
@@ -243,14 +239,14 @@ func (s *Store) loadStableStore() error {
 			atomic.StoreUint64(&s.lastVoteTerm, *(*uint64)(unsafe.Pointer(data.Base)))
 		}
 
-		key = mdbx.StringConstVal(keyLastVoteCand)
+		key = mdbx.StringConst(keyLastVoteCand)
 		if err := tx.Get(s.stableDBI, &key, &data); err != mdbx.ErrSuccess {
 			if err != mdbx.ErrNotFound {
 				return err
 			}
 		} else if data.Base != nil && data.Len > 0 {
 			s.lastVoteCand = make([]byte, data.Len)
-			copy(s.lastVoteCand, data.Unsafe())
+			copy(s.lastVoteCand, data.UnsafeBytes())
 		}
 		return nil
 	})
@@ -259,8 +255,8 @@ func (s *Store) loadStableStore() error {
 func (s *Store) Set(key []byte, val []byte) error {
 	if e := s.stableStore.Update(func(tx *mdbx.Tx) error {
 		var (
-			k = bytesToVal(key)
-			v = bytesToVal(val)
+			k = mdbx.Bytes(&key)
+			v = mdbx.Bytes(&val)
 		)
 		return tx.Put(s.stableDBI, &k, &v, 0)
 	}); e != nil && e != mdbx.ErrSuccess {
@@ -296,7 +292,7 @@ func (s *Store) Get(key []byte) (result []byte, err error) {
 	}
 	if e := s.stableStore.View(func(tx *mdbx.Tx) error {
 		var (
-			k = bytesToVal(key)
+			k = mdbx.Bytes(&key)
 			v = mdbx.Val{}
 		)
 		e := tx.Get(s.stableDBI, &k, &v)
@@ -304,7 +300,7 @@ func (s *Store) Get(key []byte) (result []byte, err error) {
 			return e
 		}
 		result = make([]byte, v.Len)
-		copy(result, v.Unsafe())
+		copy(result, v.UnsafeBytes())
 		return nil
 	}); e != nil {
 		if e == mdbx.ErrNotFound {
@@ -322,7 +318,7 @@ func (s *Store) Get(key []byte) (result []byte, err error) {
 func (s *Store) SetUint64(key []byte, val uint64) error {
 	if e := s.stableStore.Update(func(tx *mdbx.Tx) error {
 		var (
-			k = bytesToVal(key)
+			k = mdbx.Bytes(&key)
 			v = mdbx.Val{
 				Base: (*byte)(unsafe.Pointer(&val)),
 				Len:  8,
@@ -368,7 +364,7 @@ func (s *Store) GetUint64(key []byte) (result uint64, err error) {
 
 	if e := s.stableStore.View(func(tx *mdbx.Tx) error {
 		var (
-			k   = bytesToVal(key)
+			k   = mdbx.Bytes(&key)
 			val = mdbx.Val{}
 		)
 		e := tx.Get(s.stableDBI, &k, &val)
@@ -421,7 +417,7 @@ func (s *Store) GetLog(index uint64, log *raft.Log) error {
 		}
 
 		if val.Base != nil {
-			if err := UnmarshalLog(val.Unsafe(), log); err != nil {
+			if err := unmarshalLog(val.UnsafeBytes(), log); err != nil {
 				return err
 			}
 		}
@@ -454,7 +450,7 @@ func (s *Store) StoreLog(log *raft.Log) error {
 			return e
 		}
 		// Marshal directly into MDBX managed buffer which will be saved once committed.
-		if _, err := MarshalLog(log, v.Unsafe()); err != nil {
+		if _, err := marshalLog(log, v.UnsafeBytes()); err != nil {
 			return err
 		}
 		return nil
@@ -497,7 +493,7 @@ func (s *Store) StoreLogs(logs []*raft.Log) error {
 			if err = cursor.Put(&k, &v, mdbx.PutReserve|mdbx.PutAppend); e != mdbx.ErrSuccess {
 				return err
 			}
-			if _, err = MarshalLog(log, v.Unsafe()); err != nil {
+			if _, err = marshalLog(log, v.UnsafeBytes()); err != nil {
 				return err
 			}
 		}
@@ -508,6 +504,11 @@ func (s *Store) StoreLogs(logs []*raft.Log) error {
 	}
 
 	atomic.StoreUint64(&s.lastIndex, logs[len(logs)-1].Index)
+
+	// sync to disk
+	if err := s.logStore.Sync(); err != nil {
+		logger.WarnErr(err)
+	}
 	return nil
 }
 
@@ -584,7 +585,7 @@ func SerializedSize(log *raft.Log) int {
 	return 33 + len(log.Data) + len(log.Extensions)
 }
 
-func MarshalLog(log *raft.Log, b []byte) ([]byte, error) {
+func marshalLog(log *raft.Log, b []byte) ([]byte, error) {
 	sz := SerializedSize(log)
 	if len(b) < sz {
 		b = make([]byte, sz)
@@ -611,7 +612,7 @@ func MarshalLog(log *raft.Log, b []byte) ([]byte, error) {
 	return b, nil
 }
 
-func UnmarshalLog(b []byte, log *raft.Log) error {
+func unmarshalLog(b []byte, log *raft.Log) error {
 	if len(b) < 33 {
 		return errors.New("malformed log message")
 	}

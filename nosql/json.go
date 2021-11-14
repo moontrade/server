@@ -4,38 +4,38 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func jsonFloat64(selector string) func(doc string) (float64, error) {
-	return func(doc string) (float64, error) {
+func jsonFloat64(selector string) Float64ValueOf {
+	return func(doc string, unmarshalled interface{}) (float64, error) {
 		return gjson.Get(doc, selector).Float(), nil
 	}
 }
 
-func jsonFloat64Array(selector string) func(doc string, into []float64) ([]float64, error) {
-	return func(doc string, into []float64) ([]float64, error) {
+func jsonFloat64Array(selector string) Float64ArrayValueOf {
+	return func(doc string, unmarshalled interface{}, into []float64) ([]float64, error) {
 		return jsonFloat64CopyInto(doc, selector, into)
 	}
 }
 
-func jsonInt64(selector string) func(doc string) (int64, error) {
-	return func(doc string) (int64, error) {
+func jsonInt64(selector string) Int64ValueOf {
+	return func(doc string, unmarshalled interface{}) (int64, error) {
 		return gjson.Get(doc, selector).Int(), nil
 	}
 }
 
-func jsonInt64Array(selector string) func(doc string, into []int64) ([]int64, error) {
-	return func(doc string, into []int64) ([]int64, error) {
+func jsonInt64Array(selector string) Int64ArrayValueOf {
+	return func(doc string, unmarshalled interface{}, into []int64) ([]int64, error) {
 		return jsonInt64CopyInto(doc, selector, into)
 	}
 }
 
-func jsonString(selector string) func(doc string, into []byte) ([]byte, error) {
-	return func(doc string, into []byte) ([]byte, error) {
+func jsonString(selector string) StringValueOf {
+	return func(doc string, unmarshalled interface{}, into []byte) ([]byte, error) {
 		return copyInto(gjson.Get(doc, selector).String(), into)
 	}
 }
 
-func jsonStringArray(selector string) func(doc string, into []string) ([]string, error) {
-	return func(doc string, into []string) ([]string, error) {
+func jsonStringArray(selector string) StringArrayValueOf {
+	return func(doc string, unmarshalled interface{}, into []string) ([]string, error) {
 		return jsonStringCopyInto(doc, selector, into)
 	}
 }

@@ -21,22 +21,40 @@ var (
 	stringTypeOf        = reflect.TypeOf(String{})
 	uniqueStringTypeOf  = reflect.TypeOf(StringUnique{})
 	stringArrayTypeOf   = reflect.TypeOf(StringArray{})
+	schemaTypeOf        = reflect.TypeOf(Schema{})
 
 	errNotCollectionType = errors.New("not collection type")
 	errNotIndexType      = errors.New("not index type")
 
-	ErrAlreadyLoaded   = errors.New("already loaded")
-	ErrCollectionStore = errors.New("collection store not exist")
+	ErrAlreadyLoaded          = errors.New("already loaded")
+	ErrSchemaFieldNotFound    = errors.New("schema field not found: add '*nosql.Schema' field")
+	ErrCollectionStore        = errors.New("collection store not exist")
+	ErrCollectionIDExhaustion = errors.New("collection id exhaustion")
+	ErrIndexIDExhaustion      = errors.New("index id exhaustion")
+	ErrSchemaIDExhaustion     = errors.New("schema id exhaustion")
 )
 
 // Schema provides a flat list of named Collections and their indexes.
-// It does NOT describe the schema of documents.
+// It does NOT enforce any layout of the individual document specs. JSON
+// formatted documents support indexing natively. JSON indexes utilize gjson
+// selector to extract the field(s) required to build index.
+//
+// It is recommended to use the strongly typed Schema pattern. Hydrating a
+// Schema in a Store will produce and apply an evolution to keep the Schema
+// consistent. This simplifies a lot of bug prone manual index and collection
+// bookkeeping.
 type Schema struct {
 	Meta          SchemaMeta
 	Collections   []Collection
-	CollectionMap map[string]Collection
+	collectionMap map[string]Collection
 	store         *Store
 	mu            sync.Mutex
+}
+
+func (s *Schema) IsLoaded() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.store != nil
 }
 
 func (s *Schema) buildMeta() *SchemaMeta {
@@ -65,6 +83,11 @@ type SchemaMeta struct {
 	FQN         string           `json:"fqn"`
 	Checksum    uint64           `json:"checksum"`
 	Collections []CollectionMeta `json:"collections"`
+	Mutations   struct {
+	} `json:"mutations"`
+}
+
+type SchemaMutation struct {
 }
 
 func fqnOf(t reflect.Type) string {
@@ -73,18 +96,6 @@ func fqnOf(t reflect.Type) string {
 		return t.Name()
 	}
 	return fmt.Sprintf("%s.%s", pkg, t.Name())
-}
-
-func (s *Store) LoadSchema(schema *Schema) error {
-	schema.mu.Lock()
-	defer schema.mu.Unlock()
-	if schema.store != nil {
-		if schema.store != s {
-			return ErrAlreadyLoaded
-		}
-		return nil
-	}
-	return nil
 }
 
 func ParseSchema(prototype interface{}) (*Schema, error) {
@@ -108,23 +119,36 @@ func ParseSchemaWithUID(uid string, prototype interface{}) (*Schema, error) {
 		uid = ""
 	}
 
-	schema := &Schema{
-		Meta: SchemaMeta{
-			UID:  uid,
-			Name: t.Name(),
-			Pkg:  t.PkgPath(),
-			FQN:  fqn,
-		},
-		Collections:   make([]Collection, 0, 16),
-		CollectionMap: make(map[string]Collection),
-	}
-	numFields := val.NumField()
+	var (
+		schema = &Schema{
+			Meta: SchemaMeta{
+				UID:  uid,
+				Name: t.Name(),
+				Pkg:  t.PkgPath(),
+				FQN:  fqn,
+			},
+			Collections:   make([]Collection, 0, 16),
+			collectionMap: make(map[string]Collection),
+		}
+		numFields        = val.NumField()
+		schemaFieldFound bool
+		schemaField      reflect.StructField
+		schemaValue      reflect.Value
+	)
+
+LOOP:
 	for i := 0; i < numFields; i++ {
 		fieldValue := val.Field(i)
 		fieldType := t.Field(i)
 
 		ft := fieldValue.Type()
-		for ft.Kind() == reflect.Ptr {
+		if ft.Kind() == reflect.Ptr {
+			if ft.Elem().AssignableTo(schemaTypeOf) {
+				schemaFieldFound = true
+				schemaField = fieldType
+				schemaValue = fieldValue
+				continue LOOP
+			}
 			ft = ft.Elem()
 		}
 		if ft.Kind() != reflect.Struct {
@@ -135,14 +159,21 @@ func ParseSchemaWithUID(uid string, prototype interface{}) (*Schema, error) {
 		if err != nil {
 			return nil, err
 		}
-		_, ok := schema.CollectionMap[col.Name]
+		_, ok := schema.collectionMap[col.Name]
 		if ok {
 			return nil, fmt.Errorf("duplicate collections named %s", col.Name)
 		}
-		schema.CollectionMap[col.Name] = col
+		schema.collectionMap[col.Name] = col
 		*(*Collection)(unsafe.Pointer(fieldValue.UnsafeAddr())) = col
 		schema.Collections = append(schema.Collections, col)
 	}
+
+	if !schemaFieldFound {
+		return nil, ErrSchemaFieldNotFound
+	}
+
+	_ = schemaField
+	schemaValue.Set(reflect.ValueOf(schema))
 
 	return schema, nil
 }
@@ -269,53 +300,54 @@ func parseIndex(
 		name     = strings.TrimSpace(field.Tag.Get("name"))
 		ft       = field.Type
 		selector = field.Tag.Get("@")
+		version  = field.Tag.Get("version")
 	)
 	if len(name) == 0 {
 		name = snakeCase(field.Name)
 	}
 	switch {
 	case ft.AssignableTo(int64TypeOf):
-		index := NewInt64(name, selector, val.Interface().(Int64).ValueOf)
+		index := NewInt64(name, selector, version, val.Interface().(Int64).ValueOf)
 		*(*Int64)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
 	case ft.AssignableTo(uniqueInt64TypeOf):
-		index := NewInt64Unique(name, selector, val.Interface().(Int64Unique).ValueOf)
+		index := NewInt64Unique(name, selector, version, val.Interface().(Int64Unique).ValueOf)
 		*(*Int64Unique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
 	case ft.AssignableTo(int64ArrayTypeOf):
-		index := NewInt64Array(name, selector, val.Interface().(Int64Array).ValueOf)
+		index := NewInt64Array(name, selector, version, val.Interface().(Int64Array).ValueOf)
 		*(*Int64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
 	case ft.AssignableTo(float64TypeOf):
-		index := NewFloat64(name, selector, val.Interface().(Float64).ValueOf)
+		index := NewFloat64(name, selector, version, val.Interface().(Float64).ValueOf)
 		*(*Float64)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
 	case ft.AssignableTo(uniqueFloat64TypeOf):
-		index := NewFloat64Unique(name, selector, val.Interface().(Float64Unique).ValueOf)
+		index := NewFloat64Unique(name, selector, version, val.Interface().(Float64Unique).ValueOf)
 		*(*Float64Unique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
 	case ft.AssignableTo(float64ArrayTypeOf):
-		index := NewFloat64Array(name, selector, val.Interface().(Float64Array).ValueOf)
+		index := NewFloat64Array(name, selector, version, val.Interface().(Float64Array).ValueOf)
 		*(*Float64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
 	case ft.AssignableTo(stringTypeOf):
-		index := NewString(name, selector, val.Interface().(String).ValueOf)
+		index := NewString(name, selector, version, val.Interface().(String).ValueOf)
 		*(*String)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
 	case ft.AssignableTo(uniqueStringTypeOf):
-		index := NewStringUnique(name, selector, val.Interface().(StringUnique).ValueOf)
+		index := NewStringUnique(name, selector, version, val.Interface().(StringUnique).ValueOf)
 		*(*StringUnique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
 	case ft.AssignableTo(stringArrayTypeOf):
-		index := NewStringArray(name, selector, val.Interface().(StringArray).ValueOf)
+		index := NewStringArray(name, selector, version, val.Interface().(StringArray).ValueOf)
 		*(*StringArray)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 	}

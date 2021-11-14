@@ -29,9 +29,16 @@ func (r DocID) Sequence() uint64 {
 	return result
 }
 
-func NewRecordID(collection CollectionID, id uint64) DocID {
+func NewDocID(collection CollectionID, id uint64) DocID {
 	*(*uint16)(unsafe.Pointer(&id)) = uint16(collection)
 	return DocID(id)
+}
+
+func (id *DocID) Key() mdbx.Val {
+	return mdbx.Val{
+		Base: (*byte)(unsafe.Pointer(id)),
+		Len:  8,
+	}
 }
 
 type CollectionKind int
@@ -87,6 +94,70 @@ func (cd *collectionDescriptor) Equals(other *collectionDescriptor) bool {
 		cd.Version == other.Version
 }
 
+func (s *Store) EstimateCollectionCount(collectionID CollectionID) (count int64, err error) {
+	err = s.store.View(func(tx *mdbx.Tx) error {
+		var (
+			k     = NewDocID(collectionID, 0)
+			key   = k.Key()
+			data  = mdbx.Val{}
+			first *mdbx.Cursor
+			last  *mdbx.Cursor
+		)
+
+		first, err = tx.OpenCursor(s.documentsDBI)
+		if err != mdbx.ErrSuccess {
+			return err
+		}
+		err = nil
+		defer first.Close()
+
+		last, err = tx.OpenCursor(s.documentsDBI)
+		if err != mdbx.ErrSuccess {
+			return err
+		}
+		err = nil
+		defer last.Close()
+
+		if err = first.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+			if err == mdbx.ErrNotFound {
+				err = nil
+				return nil
+			}
+			return err
+		}
+		id := DocID(key.U64())
+		if id.CollectionID() != collectionID {
+			return nil
+		}
+		if err = last.Get(&key, &data, mdbx.CursorPrevNoDup); err != mdbx.ErrSuccess {
+			if err == mdbx.ErrNotFound {
+				err = nil
+				return nil
+			}
+			return err
+		}
+		lastID := DocID(key.U64())
+		if lastID.CollectionID() != collectionID {
+			count = 1
+			return nil
+		}
+
+		count, err = mdbx.EstimateDistance(first, last)
+		if err == mdbx.ErrNotFound {
+			count = 1
+			return nil
+		}
+		if err == mdbx.ErrSuccess {
+			err = nil
+		}
+		return err
+	})
+	if err == mdbx.ErrSuccess {
+		err = nil
+	}
+	return
+}
+
 type collectionStore struct {
 	CollectionMeta
 	Type       reflect.Type
@@ -114,28 +185,28 @@ func docIDVal(key *DocID) mdbx.Val {
 }
 
 func (s *collectionStore) RecordID(sequence uint64) DocID {
-	return NewRecordID(s.id, sequence)
+	return NewDocID(s.id, sequence)
 }
 
 func (s *collectionStore) NextID() DocID {
-	return NewRecordID(s.id, atomic.AddUint64(&s.sequence, 1))
+	return NewDocID(s.id, atomic.AddUint64(&s.sequence, 1))
 }
 
-func (s *collectionStore) Insert(tx *mdbx.Tx, data []byte) (DocID, error) {
+func (s *collectionStore) Insert(tx *Tx, data []byte, unmarshalled interface{}) (DocID, error) {
 	var (
-		k   = NewRecordID(s.id, atomic.AddUint64(&s.sequence, 1))
+		k   = NewDocID(s.id, atomic.AddUint64(&s.sequence, 1))
 		key = docIDVal(&k)
-		val = mdbx.BytesVal(&data)
+		val = mdbx.Bytes(&data)
 		d   = *(*string)(unsafe.Pointer(&data))
 		err error
 	)
-	if err = tx.Put(s.store.documentsDBI, &key, &val, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
+	if err = tx.Tx.Put(s.store.documentsDBI, &key, &val, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
 		return 0, err
 	}
 	// Insert indexes
 	if len(s.indexes) > 0 {
 		for _, index := range s.indexes {
-			if err = index.insert(tx, k, d); err != nil {
+			if err = index.insert(tx, k, d, unmarshalled); err != nil {
 				return 0, err
 			}
 		}
@@ -143,20 +214,20 @@ func (s *collectionStore) Insert(tx *mdbx.Tx, data []byte) (DocID, error) {
 	return k, nil
 }
 
-func (s *collectionStore) Update(tx *mdbx.Tx, id DocID, data []byte) error {
+func (s *collectionStore) Update(tx *Tx, id DocID, data []byte, unmarshalled interface{}) error {
 	var (
 		key = docIDVal(&id)
-		val = mdbx.BytesVal(&data)
+		val = mdbx.Bytes(&data)
 		d   = *(*string)(unsafe.Pointer(&data))
 		err error
 	)
-	if err := tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
+	if err := tx.Tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
 		return err
 	}
 	// Update indexes
 	if len(s.indexes) > 0 {
 		for _, index := range s.indexes {
-			if _, err = index.update(tx, id, d); err != nil {
+			if _, err = index.update(tx, id, d, unmarshalled); err != nil {
 				return err
 			}
 		}
@@ -164,13 +235,13 @@ func (s *collectionStore) Update(tx *mdbx.Tx, id DocID, data []byte) error {
 	return nil
 }
 
-func (s *collectionStore) Delete(tx *mdbx.Tx, id DocID) (bool, error) {
+func (s *collectionStore) Delete(tx *Tx, id DocID, unmarshalled interface{}) (bool, error) {
 	var (
 		key = docIDVal(&id)
 		val = mdbx.Val{}
 		err error
 	)
-	if err := tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
+	if err := tx.Tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
 		if err == mdbx.ErrNotFound {
 			return false, nil
 		}
@@ -178,10 +249,10 @@ func (s *collectionStore) Delete(tx *mdbx.Tx, id DocID) (bool, error) {
 	}
 	// Delete indexes
 	if len(s.indexes) > 0 {
-		data := val.Unsafe()
+		data := val.UnsafeBytes()
 		d := *(*string)(unsafe.Pointer(&data))
 		for _, index := range s.indexes {
-			if _, err = index.delete(tx, id, d); err != nil {
+			if _, err = index.delete(tx, id, d, unmarshalled); err != nil {
 				return false, err
 			}
 		}
@@ -189,13 +260,13 @@ func (s *collectionStore) Delete(tx *mdbx.Tx, id DocID) (bool, error) {
 	return true, nil
 }
 
-func (s *collectionStore) DeleteGet(tx *mdbx.Tx, id DocID, onData func(data mdbx.Val)) (bool, error) {
+func (s *collectionStore) DeleteGet(tx *Tx, id DocID, unmarshalled interface{}, onData func(data mdbx.Val)) (bool, error) {
 	var (
 		key = docIDVal(&id)
 		val = mdbx.Val{}
 		err error
 	)
-	if err := tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
+	if err := tx.Tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
 		if err == mdbx.ErrNotFound {
 			return false, nil
 		}
@@ -203,10 +274,10 @@ func (s *collectionStore) DeleteGet(tx *mdbx.Tx, id DocID, onData func(data mdbx
 	}
 	// Delete indexes
 	if len(s.indexes) > 0 {
-		data := val.Unsafe()
+		data := val.UnsafeBytes()
 		d := *(*string)(unsafe.Pointer(&data))
 		for _, index := range s.indexes {
-			if _, err = index.delete(tx, id, d); err != nil {
+			if _, err = index.delete(tx, id, d, unmarshalled); err != nil {
 				return false, err
 			}
 		}

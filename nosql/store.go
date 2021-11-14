@@ -4,6 +4,7 @@ import (
 	"errors"
 	"github.com/moontrade/mdbx-go"
 	"os"
+	"sync"
 )
 
 var (
@@ -18,9 +19,43 @@ var (
 )
 
 const (
+	DefaultDurable = mdbx.EnvSyncDurable |
+		mdbx.EnvNoTLS |
+		mdbx.EnvLIFOReclaim |
+		mdbx.EnvNoMemInit |
+		mdbx.EnvCoalesce
+
+	DefaultDurableFast = mdbx.EnvNoMetaSync |
+		mdbx.EnvNoTLS |
+		mdbx.EnvLIFOReclaim |
+		mdbx.EnvNoMemInit |
+		mdbx.EnvCoalesce
+
+	DefaultAsync = mdbx.EnvSafeNoSync |
+		mdbx.EnvNoTLS |
+		mdbx.EnvLIFOReclaim |
+		mdbx.EnvNoMemInit |
+		mdbx.EnvCoalesce
+
+	DefaultAsyncMap = mdbx.EnvSafeNoSync |
+		mdbx.EnvWriteMap |
+		mdbx.EnvNoTLS |
+		mdbx.EnvLIFOReclaim |
+		mdbx.EnvNoMemInit |
+		mdbx.EnvCoalesce
+
+	DefaultNoSync = mdbx.EnvUtterlyNoSync |
+		mdbx.EnvWriteMap |
+		mdbx.EnvNoTLS |
+		mdbx.EnvLIFOReclaim |
+		mdbx.EnvNoMemInit |
+		mdbx.EnvCoalesce
+)
+
+const (
 	kvDBI        = "kv"
 	documentsDBI = "docs"
-	indexDBI     = "index"
+	indexDBI     = "idx"
 )
 
 var (
@@ -37,8 +72,21 @@ type Store struct {
 	documentsDBI mdbx.DBI    // documents database
 	indexDBI     mdbx.DBI    // indexes database
 	streamDBI    mdbx.DBI    // streams database
+	schemas      *schemasStore
+	mu           sync.Mutex
+}
 
-	schemas *schemasStore
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.store == nil {
+		return nil
+	}
+	if err := s.store.Close(); err != nil {
+		return err
+	}
+	s.store = nil
+	return nil
 }
 
 type Config struct {
@@ -77,17 +125,22 @@ func Open(config *Config) (*Store, error) {
 				if s.kvDBI, e = tx.OpenDBI(kvDBI, mdbx.DBCreate); e != mdbx.ErrSuccess {
 					return e
 				}
-				if s.documentsDBI, e = tx.OpenDBI(documentsDBI, mdbx.DBCreate|mdbx.DBIntegerKey); e != mdbx.ErrSuccess {
+				if s.documentsDBI, e = tx.OpenDBIEx(documentsDBI, mdbx.DBCreate|mdbx.DBIntegerKey, mdbx.CmpU64, nil); e != mdbx.ErrSuccess {
 					return e
 				}
-				if s.indexDBI, e = tx.OpenDBI(indexDBI, mdbx.DBCreate); e != mdbx.ErrSuccess {
+				if s.indexDBI, e = tx.OpenDBIEx(indexDBI, mdbx.DBCreate, mdbx.CmpU32PrefixLexical, nil); e != mdbx.ErrSuccess {
 					return e
 				}
 				return nil
 			})
-		}); err != nil {
+		}); err != nil && err != mdbx.ErrSuccess {
 		return nil, err
 	}
 
-	return nil, nil
+	if s.schemas, err = openSchemaStore(s); err != nil {
+		_ = s.store.Close()
+		return nil, err
+	}
+
+	return s, nil
 }
