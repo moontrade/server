@@ -319,10 +319,7 @@ func (s *Store) SetUint64(key []byte, val uint64) error {
 	if e := s.stableStore.Update(func(tx *mdbx.Tx) error {
 		var (
 			k = mdbx.Bytes(&key)
-			v = mdbx.Val{
-				Base: (*byte)(unsafe.Pointer(&val)),
-				Len:  8,
-			}
+			v = mdbx.U64(&val)
 		)
 		return tx.Put(s.stableDBI, &k, &v, 0)
 	}); e != nil && e != mdbx.ErrSuccess {
@@ -405,10 +402,7 @@ func (s *Store) LastIndex() (uint64, error) {
 func (s *Store) GetLog(index uint64, log *raft.Log) error {
 	if err := s.logStore.View(func(tx *mdbx.Tx) error {
 		var (
-			key = mdbx.Val{
-				Base: (*byte)(unsafe.Pointer(&index)),
-				Len:  8,
-			}
+			key = mdbx.U64(&index)
 			val = mdbx.Val{}
 		)
 
@@ -436,10 +430,7 @@ func (s *Store) GetLog(index uint64, log *raft.Log) error {
 func (s *Store) StoreLog(log *raft.Log) error {
 	if err := s.logStore.Update(func(tx *mdbx.Tx) error {
 		var (
-			k = mdbx.Val{
-				Base: (*byte)(unsafe.Pointer(&log.Index)),
-				Len:  8,
-			}
+			k = mdbx.U64(&log.Index)
 			v = mdbx.Val{
 				Len: uint64(SerializedSize(log)),
 			}

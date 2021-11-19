@@ -1,6 +1,24 @@
 package nosql
 
-import "github.com/moontrade/mdbx-go"
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"github.com/moontrade/mdbx-go"
+	"sort"
+	"unsafe"
+)
+
+var (
+	ErrSkip             = errors.New("skip")
+	ErrIndexCorrupted   = errors.New("index corrupted")
+	ErrUniqueConstraint = errors.New("unique constraint")
+	ErrIndexKeyTooBig   = errors.New("index key too big")
+)
+
+const (
+	MaxIndexKeySize = 4000
+)
 
 type Sort byte
 
@@ -8,6 +26,15 @@ const (
 	SortDefault    Sort = 0
 	SortAscending  Sort = 1
 	SortDescending Sort = 2
+)
+
+var (
+	_ Index = (*Int64)(nil)
+	_ Index = (*Int64Unique)(nil)
+	_ Index = (*Float64)(nil)
+	_ Index = (*Float64Unique)(nil)
+	_ Index = (*String)(nil)
+	_ Index = (*StringUnique)(nil)
 )
 
 type Index interface {
@@ -25,11 +52,11 @@ type Index interface {
 
 	setStore(s *indexStore)
 
-	insert(tx *Tx, id DocID, document string, unmarshalled interface{}) error
+	doInsert(tx *Tx) error
 
-	update(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error)
+	doUpdate(tx *Tx) error
 
-	delete(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error)
+	doDelete(tx *Tx) error
 }
 
 type indexBase struct {
@@ -100,7 +127,7 @@ type indexDescriptor struct {
 	Version     string    `json:"version"`
 }
 
-func (im IndexMeta) didChange(other IndexMeta) bool {
+func (im IndexMeta) equals(other IndexMeta) bool {
 	return im.Name == other.Name &&
 		im.Selector == other.Selector &&
 		im.Kind == other.Kind &&
@@ -112,6 +139,7 @@ func (im IndexMeta) didChange(other IndexMeta) bool {
 type indexStore struct {
 	store      *Store
 	collection *collectionStore
+	index      Index
 	count      uint64
 	bytes      uint64
 }
@@ -140,17 +168,176 @@ func NewInt64(
 	}
 }
 
-func (is *Int64) insert(tx *Tx, id DocID, document string, unmarshalled interface{}) error {
-	// Layout
+func (i64 *Int64) doInsert(tx *Tx) error {
+	var (
+		value, err = i64.ValueOf(tx.doc, tx.docTyped)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  20,
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Put(&key, &data, 0); err != mdbx.ErrSuccess {
+		return err
+	} else {
+		err = nil
+	}
+
 	return nil
 }
 
-func (is *Int64) update(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (i64 *Int64) doUpdate(tx *Tx) error {
+	if len(tx.prev) == 0 {
+		return i64.doInsert(tx)
+	}
+
+	var (
+		prevValue, prevErr = i64.ValueOf(tx.prev, tx.prevTyped)
+		prevSkip           = prevErr == ErrSkip
+		nextValue, nextErr = i64.ValueOf(tx.doc, tx.docTyped)
+		nextSkip           = nextErr == ErrSkip
+	)
+
+	if prevSkip {
+		prevErr = nil
+	}
+	if nextSkip {
+		if prevSkip {
+			return nil
+		}
+		nextErr = nil
+	}
+
+	if nextErr != nil {
+		return nextErr
+	}
+	if prevErr != nil {
+		return prevErr
+	}
+
+	// Previous value?
+	if !prevSkip {
+		// Did values change?
+		if !nextSkip && prevValue == nextValue {
+			return nil
+		}
+
+		// Set key to existing value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&prevValue)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  20,
+			}
+			data mdbx.Val
+		)
+
+		// Find entry of previous value.
+		if prevErr = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); prevErr != mdbx.ErrSuccess {
+			if prevErr == mdbx.ErrNotFound {
+				prevErr = nil
+			} else {
+				return nil
+			}
+		} else {
+			prevErr = nil
+			keyBytes := key.UnsafeBytes()
+			if key.Len == 20 &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == i64.meta.ID &&
+				DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
+				bigEndianI64(keyBytes[12:]) == prevValue {
+				if prevErr = tx.index.Delete(0); prevErr != mdbx.ErrSuccess {
+					return prevErr
+				} else {
+					prevErr = nil
+				}
+			}
+		}
+	}
+
+	if !nextSkip {
+		// Set key to next value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&nextValue)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  20,
+			}
+			data mdbx.Val
+		)
+
+		if nextErr = tx.index.Put(&key, &data, 0); nextErr != mdbx.ErrSuccess {
+			return nextErr
+		} else {
+			nextErr = nil
+		}
+	}
+
+	return nil
 }
 
-func (is *Int64) delete(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (i64 *Int64) doDelete(tx *Tx) error {
+	var (
+		value, err = i64.ValueOf(tx.doc, tx.docTyped)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  20,
+		}
+		data mdbx.Val
+	)
+
+	if err = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrNotFound {
+			return nil
+		}
+		return err
+	}
+
+	keyBytes := key.UnsafeBytes()
+	if key.Len == 20 &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == i64.meta.ID &&
+		DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
+		bigEndianI64(keyBytes[12:]) == value {
+		if err = tx.index.Delete(0); err != mdbx.ErrSuccess {
+			return err
+		} else {
+			err = nil
+		}
+	}
+	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -175,16 +362,184 @@ func NewInt64Unique(
 	}
 }
 
-func (is *Int64Unique) insert(tx *Tx, id DocID, document string, unmarshalled interface{}) error {
+func (i64 *Int64Unique) doInsert(tx *Tx) error {
+	var (
+		value, err = i64.ValueOf(tx.doc, tx.docTyped)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&value)))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  12,
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Put(&key, &data, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrKeyExist {
+			return ErrUniqueConstraint
+		}
+		return err
+	} else {
+		err = nil
+	}
+
 	return nil
 }
 
-func (is *Int64Unique) update(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (i64 *Int64Unique) doUpdate(tx *Tx) error {
+	if len(tx.prev) == 0 {
+		return i64.doInsert(tx)
+	}
+
+	var (
+		prevValue, prevErr = i64.ValueOf(tx.prev, tx.prevTyped)
+		prevSkip           = prevErr == ErrSkip
+		nextValue, nextErr = i64.ValueOf(tx.doc, tx.docTyped)
+		nextSkip           = nextErr == ErrSkip
+	)
+
+	if prevSkip {
+		prevErr = nil
+	}
+	if nextSkip {
+		if prevSkip {
+			return nil
+		}
+		nextErr = nil
+	}
+
+	if nextErr != nil {
+		return nextErr
+	}
+	if prevErr != nil {
+		return prevErr
+	}
+
+	// Previous value?
+	if !prevSkip {
+		// Did values change?
+		if !nextSkip && prevValue == nextValue {
+			return nil
+		}
+
+		// Set key to existing value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&prevValue)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  12,
+			}
+			data mdbx.Val
+		)
+
+		// Find entry of previous value.
+		if prevErr = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); prevErr != mdbx.ErrSuccess {
+			if prevErr == mdbx.ErrNotFound {
+				prevErr = nil
+			} else {
+				return nil
+			}
+		} else {
+			prevErr = nil
+			keyBytes := key.UnsafeBytes()
+			if key.Len == 12 &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == i64.meta.ID &&
+				bigEndianI64(keyBytes[4:]) == prevValue {
+				if data.Len != 8 || DocID(data.U64()) != tx.docID {
+					return ErrUniqueConstraint
+				}
+
+				if prevErr = tx.index.Delete(0); prevErr != mdbx.ErrSuccess {
+					return prevErr
+				} else {
+					prevErr = nil
+				}
+			}
+		}
+	}
+
+	if !nextSkip {
+		// Set key to next value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&nextValue)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  12,
+			}
+			data = tx.docID.Key()
+		)
+
+		if nextErr = tx.index.Put(&key, &data, mdbx.PutNoOverwrite); nextErr != mdbx.ErrSuccess {
+			if nextErr == mdbx.ErrKeyExist {
+				return ErrUniqueConstraint
+			}
+			return nextErr
+		} else {
+			nextErr = nil
+		}
+	}
+
+	return nil
 }
 
-func (is *Int64Unique) delete(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (i64 *Int64Unique) doDelete(tx *Tx) error {
+	var (
+		value, err = i64.ValueOf(tx.doc, tx.docTyped)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&value)))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  12,
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrNotFound {
+			return nil
+		}
+		return err
+	}
+
+	keyBytes := key.UnsafeBytes()
+	if key.Len == 12 &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == i64.meta.ID &&
+		bigEndianI64(keyBytes[4:]) == value {
+		if data.Len != 8 || DocID(data.U64()) != tx.docID {
+			return ErrUniqueConstraint
+		}
+
+		if err = tx.index.Delete(0); err != mdbx.ErrSuccess {
+			return err
+		} else {
+			err = nil
+		}
+	}
+	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -211,7 +566,45 @@ func NewInt64Array(
 	}
 }
 
-func (is *Int64Array) insert(tx *Tx, id DocID, document string, unmarshalled interface{}) error {
+func (i64 *Int64Array) doInsert(tx *Tx) error {
+	var (
+		values, err = i64.ValueOf(tx.doc, tx.docTyped, tx.i64)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	if len(values) == 0 {
+		return nil
+	}
+
+	sort.Sort(int64Slice(values))
+
+	for _, value := range values {
+		// Set key to next value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&value)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  12,
+			}
+			data = tx.docID.Key()
+		)
+
+		if err = tx.index.Put(&key, &data, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
+			if err == mdbx.ErrKeyExist {
+				return ErrUniqueConstraint
+			}
+			return err
+		} else {
+			err = nil
+		}
+	}
+
 	return nil
 }
 
@@ -247,16 +640,176 @@ func NewFloat64(
 	}
 }
 
-func (is *Float64) insert(tx *Tx, id DocID, document string, unmarshalled interface{}) error {
+func (f64 *Float64) doInsert(tx *Tx) error {
+	var (
+		value, err = f64.ValueOf(tx.doc, tx.docTyped)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  20,
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Put(&key, &data, 0); err != mdbx.ErrSuccess {
+		return err
+	} else {
+		err = nil
+	}
+
 	return nil
 }
 
-func (is *Float64) update(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (f64 *Float64) doUpdate(tx *Tx) error {
+	if len(tx.prev) == 0 {
+		return f64.doInsert(tx)
+	}
+
+	var (
+		prevValue, prevErr = f64.ValueOf(tx.prev, tx.prevTyped)
+		prevSkip           = prevErr == ErrSkip
+		nextValue, nextErr = f64.ValueOf(tx.doc, tx.docTyped)
+		nextSkip           = nextErr == ErrSkip
+	)
+
+	if prevSkip {
+		prevErr = nil
+	}
+	if nextSkip {
+		if prevSkip {
+			return nil
+		}
+		nextErr = nil
+	}
+
+	if nextErr != nil {
+		return nextErr
+	}
+	if prevErr != nil {
+		return prevErr
+	}
+
+	// Previous value?
+	if !prevSkip {
+		// Did values change?
+		if !nextSkip && prevValue == nextValue {
+			return nil
+		}
+
+		// Set key to existing value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&prevValue)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  20,
+			}
+			data mdbx.Val
+		)
+
+		// Find entry of previous value.
+		if prevErr = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); prevErr != mdbx.ErrSuccess {
+			if prevErr == mdbx.ErrNotFound {
+				prevErr = nil
+			} else {
+				return nil
+			}
+		} else {
+			prevErr = nil
+			keyBytes := key.UnsafeBytes()
+			if key.Len == 20 &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+				DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
+				bigEndianF64(keyBytes[12:]) == prevValue {
+				if prevErr = tx.index.Delete(0); prevErr != mdbx.ErrSuccess {
+					return prevErr
+				} else {
+					prevErr = nil
+				}
+			}
+		}
+	}
+
+	if !nextSkip {
+		// Set key to next value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&nextValue)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  20,
+			}
+			data mdbx.Val
+		)
+
+		if nextErr = tx.index.Put(&key, &data, 0); nextErr != mdbx.ErrSuccess {
+			return nextErr
+		} else {
+			nextErr = nil
+		}
+	}
+
+	return nil
 }
 
-func (is *Float64) delete(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (f64 *Float64) doDelete(tx *Tx) error {
+	var (
+		value, err = f64.ValueOf(tx.doc, tx.docTyped)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  20,
+		}
+		data mdbx.Val
+	)
+
+	if err = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrNotFound {
+			return nil
+		}
+		return err
+	}
+
+	keyBytes := key.UnsafeBytes()
+	if key.Len == 20 &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+		DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
+		bigEndianF64(keyBytes[12:]) == value {
+		if err = tx.index.Delete(0); err != mdbx.ErrSuccess {
+			return err
+		} else {
+			err = nil
+		}
+	}
+	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -281,16 +834,184 @@ func NewFloat64Unique(
 	}
 }
 
-func (is *Float64Unique) insert(tx *Tx, id DocID, document string, unmarshalled interface{}) error {
+func (f64 *Float64Unique) doInsert(tx *Tx) error {
+	var (
+		value, err = f64.ValueOf(tx.doc, tx.docTyped)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&value)))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  12,
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Put(&key, &data, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrKeyExist {
+			return ErrUniqueConstraint
+		}
+		return err
+	} else {
+		err = nil
+	}
+
 	return nil
 }
 
-func (is *Float64Unique) update(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (f64 *Float64Unique) doUpdate(tx *Tx) error {
+	if len(tx.prev) == 0 {
+		return f64.doInsert(tx)
+	}
+
+	var (
+		prevValue, prevErr = f64.ValueOf(tx.prev, tx.prevTyped)
+		prevSkip           = prevErr == ErrSkip
+		nextValue, nextErr = f64.ValueOf(tx.doc, tx.docTyped)
+		nextSkip           = nextErr == ErrSkip
+	)
+
+	if prevSkip {
+		prevErr = nil
+	}
+	if nextSkip {
+		if prevSkip {
+			return nil
+		}
+		nextErr = nil
+	}
+
+	if nextErr != nil {
+		return nextErr
+	}
+	if prevErr != nil {
+		return prevErr
+	}
+
+	// Previous value?
+	if !prevSkip {
+		// Did values change?
+		if !nextSkip && prevValue == nextValue {
+			return nil
+		}
+
+		// Set key to existing value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&prevValue)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  12,
+			}
+			data mdbx.Val
+		)
+
+		// Find entry of previous value.
+		if prevErr = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); prevErr != mdbx.ErrSuccess {
+			if prevErr == mdbx.ErrNotFound {
+				prevErr = nil
+			} else {
+				return nil
+			}
+		} else {
+			prevErr = nil
+			keyBytes := key.UnsafeBytes()
+			if key.Len == 12 &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+				bigEndianF64(keyBytes[4:]) == prevValue {
+				if data.Len != 8 || DocID(data.U64()) != tx.docID {
+					return ErrUniqueConstraint
+				}
+
+				if prevErr = tx.index.Delete(0); prevErr != mdbx.ErrSuccess {
+					return prevErr
+				} else {
+					prevErr = nil
+				}
+			}
+		}
+	}
+
+	if !nextSkip {
+		// Set key to next value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&nextValue)))
+
+		var (
+			key = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  12,
+			}
+			data = tx.docID.Key()
+		)
+
+		if nextErr = tx.index.Put(&key, &data, mdbx.PutNoOverwrite); nextErr != mdbx.ErrSuccess {
+			if nextErr == mdbx.ErrKeyExist {
+				return ErrUniqueConstraint
+			}
+			return nextErr
+		} else {
+			nextErr = nil
+		}
+	}
+
+	return nil
 }
 
-func (is *Float64Unique) delete(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (f64 *Float64Unique) doDelete(tx *Tx) error {
+	var (
+		value, err = f64.ValueOf(tx.doc, tx.docTyped)
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], *(*uint64)(unsafe.Pointer(&value)))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  12,
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrNotFound {
+			return nil
+		}
+		return err
+	}
+
+	keyBytes := key.UnsafeBytes()
+	if key.Len == 12 &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+		bigEndianF64(keyBytes[4:]) == value {
+		if data.Len != 8 || DocID(data.U64()) != tx.docID {
+			return ErrUniqueConstraint
+		}
+
+		if err = tx.index.Delete(0); err != mdbx.ErrSuccess {
+			return err
+		} else {
+			err = nil
+		}
+	}
+	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -353,16 +1074,185 @@ func NewString(
 	}
 }
 
-func (is *String) insert(tx *Tx, id DocID, document string, unmarshalled interface{}) error {
+func (str *String) doInsert(tx *Tx) error {
+	var (
+		value, err = str.ValueOf(tx.doc, tx.docTyped, tx.buffer[12:])
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+
+	var (
+		key = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  uint64(12 + len(value)),
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Put(&key, &data, 0); err != mdbx.ErrSuccess {
+		return err
+	} else {
+		err = nil
+	}
+
 	return nil
 }
 
-func (is *String) update(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (str *String) doUpdate(tx *Tx) error {
+	if len(tx.prev) == 0 {
+		return str.doInsert(tx)
+	}
+
+	var (
+		prevValue, prevErr = str.ValueOf(tx.prev, tx.prevTyped, tx.buffer[12:])
+		prevSkip           = prevErr == ErrSkip
+		nextOffset         = 12 + len(prevValue)
+	)
+	var (
+		nextValue, nextErr = str.ValueOf(tx.doc, tx.docTyped, tx.buffer[nextOffset+12:])
+		nextSkip           = nextErr == ErrSkip
+	)
+
+	if prevSkip {
+		prevErr = nil
+	}
+	if nextSkip {
+		if prevSkip {
+			return nil
+		}
+		nextErr = nil
+	}
+
+	if nextErr != nil {
+		return nextErr
+	}
+	if prevErr != nil {
+		return prevErr
+	}
+
+	if len(prevValue) > MaxIndexKeySize || len(nextValue) > MaxIndexKeySize {
+		return ErrIndexKeyTooBig
+	}
+	if len(tx.buffer) < 48+len(prevValue)+len(nextValue) {
+		return ErrIndexKeyTooBig
+	}
+
+	// Previous value?
+	if !prevSkip {
+		// Did values change?
+		if !nextSkip && bytes.Equal(prevValue, nextValue) {
+			return nil
+		}
+
+		// Set key to existing value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+
+		var (
+			keyLen = uint64(12 + len(prevValue))
+			key    = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  keyLen,
+			}
+			data mdbx.Val
+		)
+
+		// Find entry of previous value.
+		if prevErr = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); prevErr != mdbx.ErrSuccess {
+			if prevErr == mdbx.ErrNotFound {
+				prevErr = nil
+			} else {
+				return nil
+			}
+		} else {
+			prevErr = nil
+			keyBytes := key.UnsafeBytes()
+			if key.Len == keyLen &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+				DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
+				bytes.Equal(keyBytes[12:], prevValue) {
+				if prevErr = tx.index.Delete(0); prevErr != mdbx.ErrSuccess {
+					return prevErr
+				} else {
+					prevErr = nil
+				}
+			}
+		}
+	}
+
+	if !nextSkip {
+		// Set key to next value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[nextOffset])) = str.meta.ID
+		binary.BigEndian.PutUint64(tx.buffer[nextOffset+4:], uint64(tx.docID))
+
+		var (
+			keyLen = uint64(12 + len(nextValue))
+			key    = mdbx.Val{
+				Base: &tx.buffer[nextOffset],
+				Len:  keyLen,
+			}
+			data mdbx.Val
+		)
+
+		if nextErr = tx.index.Put(&key, &data, 0); nextErr != mdbx.ErrSuccess {
+			return nextErr
+		} else {
+			nextErr = nil
+		}
+	}
+
+	return nil
 }
 
-func (is *String) delete(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (str *String) doDelete(tx *Tx) error {
+	var (
+		value, err = str.ValueOf(tx.doc, tx.docTyped, tx.buffer[12:])
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
+
+	var (
+		keyLen = uint64(12 + len(value))
+		key    = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  keyLen,
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrNotFound {
+			return nil
+		}
+		return err
+	}
+
+	keyBytes := key.UnsafeBytes()
+	if key.Len == keyLen &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+		DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
+		bytes.Equal(keyBytes[12:], tx.buffer[12:]) {
+		if err = tx.index.Delete(0); err != mdbx.ErrSuccess {
+			return err
+		} else {
+			err = nil
+		}
+	}
+	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -387,16 +1277,197 @@ func NewStringUnique(
 	}
 }
 
-func (is *StringUnique) insert(tx *Tx, id DocID, document string, unmarshalled interface{}) error {
+func (str *StringUnique) doInsert(tx *Tx) error {
+	var (
+		value, err = str.ValueOf(tx.doc, tx.docTyped, tx.buffer[4:])
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+	if len(value) > MaxIndexKeySize {
+		return ErrIndexKeyTooBig
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+
+	var (
+		keyLen = uint64(4 + len(value))
+		key    = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  keyLen,
+		}
+		data = tx.docID.Key()
+	)
+
+	if err = tx.index.Put(&key, &data, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrKeyExist {
+			return ErrUniqueConstraint
+		}
+		return err
+	} else {
+		err = nil
+	}
+
 	return nil
 }
 
-func (is *StringUnique) update(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (str *StringUnique) doUpdate(tx *Tx) error {
+	if len(tx.prev) == 0 {
+		return str.doInsert(tx)
+	}
+
+	var (
+		prevValue, prevErr = str.ValueOf(tx.prev, tx.prevTyped, tx.buffer[4:])
+		prevSkip           = prevErr == ErrSkip
+		nextOffset         = 4 + len(prevValue)
+	)
+	var (
+		nextValue, nextErr = str.ValueOf(tx.doc, tx.docTyped, tx.buffer[nextOffset+4:])
+		nextSkip           = nextErr == ErrSkip
+	)
+
+	if prevSkip {
+		prevErr = nil
+	}
+	if nextSkip {
+		if prevSkip {
+			return nil
+		}
+		nextErr = nil
+	}
+
+	if nextErr != nil {
+		return nextErr
+	}
+	if prevErr != nil {
+		return prevErr
+	}
+
+	if len(prevValue) > MaxIndexKeySize || len(nextValue) > MaxIndexKeySize {
+		return ErrIndexKeyTooBig
+	}
+	if len(tx.buffer) < 48+len(prevValue)+len(nextValue) {
+		return ErrIndexKeyTooBig
+	}
+
+	// Previous value?
+	if !prevSkip {
+		// Did values change?
+		if !nextSkip && bytes.Equal(prevValue, nextValue) {
+			return nil
+		}
+
+		// Set key to existing value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+
+		var (
+			keyLen = uint64(4 + len(prevValue))
+			key    = mdbx.Val{
+				Base: &tx.buffer[0],
+				Len:  keyLen,
+			}
+			data mdbx.Val
+		)
+
+		// Find entry of previous value.
+		if prevErr = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); prevErr != mdbx.ErrSuccess {
+			if prevErr == mdbx.ErrNotFound {
+				prevErr = nil
+			} else {
+				return nil
+			}
+		} else {
+			prevErr = nil
+			keyBytes := key.UnsafeBytes()
+			if key.Len == 12 &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+				bytes.Equal(keyBytes[4:], prevValue) {
+				if data.Len != 8 || DocID(data.U64()) != tx.docID {
+					return ErrUniqueConstraint
+				}
+
+				if prevErr = tx.index.Delete(0); prevErr != mdbx.ErrSuccess {
+					return prevErr
+				} else {
+					prevErr = nil
+				}
+			}
+		}
+	}
+
+	if !nextSkip {
+		// Set key to next value
+		*(*uint32)(unsafe.Pointer(&tx.buffer[nextOffset])) = str.meta.ID
+
+		var (
+			keyLen = uint64(4 + len(nextValue))
+			key    = mdbx.Val{
+				Base: &tx.buffer[nextOffset],
+				Len:  keyLen,
+			}
+			data = tx.docID.Key()
+		)
+
+		if nextErr = tx.index.Put(&key, &data, mdbx.PutNoOverwrite); nextErr != mdbx.ErrSuccess {
+			if nextErr == mdbx.ErrKeyExist {
+				return ErrUniqueConstraint
+			}
+			return nextErr
+		} else {
+			nextErr = nil
+		}
+	}
+
+	return nil
 }
 
-func (is *StringUnique) delete(tx *Tx, id DocID, document string, unmarshalled interface{}) (bool, error) {
-	return false, nil
+func (str *StringUnique) doDelete(tx *Tx) error {
+	var (
+		value, err = str.ValueOf(tx.doc, tx.docTyped, tx.buffer[4:])
+	)
+	if err != nil {
+		if err == ErrSkip {
+			return err
+		}
+	}
+
+	// Set key to next value
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+
+	var (
+		keyLen = uint64(4 + len(value))
+		key    = mdbx.Val{
+			Base: &tx.buffer[0],
+			Len:  keyLen,
+		}
+		data mdbx.Val
+	)
+
+	if err = tx.index.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrNotFound {
+			return nil
+		}
+		return err
+	}
+
+	keyBytes := key.UnsafeBytes()
+	if key.Len == keyLen &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+		bytes.Equal(keyBytes[4:], value) {
+		if data.Len != 8 || DocID(data.U64()) != tx.docID {
+			return ErrUniqueConstraint
+		}
+
+		if err = tx.index.Delete(0); err != mdbx.ErrSuccess {
+			return err
+		} else {
+			err = nil
+		}
+	}
+	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////

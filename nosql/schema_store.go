@@ -25,59 +25,57 @@ type schemasStore struct {
 	store           *Store
 	schemas         []*SchemaMeta
 	schemasByUID    map[string]*SchemaMeta
+	evolutions      map[string]*evolution
 	maxCollectionId uint32
 	maxIndexID      uint32
 	maxSchemaID     uint32
 	mu              sync.Mutex
 }
 
-func (s *Store) Hydrate(ctx context.Context, schema *Schema) (chan EvolutionProgress, error) {
-	//if schema.IsLoaded() {
-	//	return nil, ErrAlreadyLoaded
-	//}
+func (s *Store) Hydrate(ctx context.Context, schema *Schema) (<-chan EvolutionProgress, error) {
 	return s.schemas.hydrate(ctx, schema)
 }
 
-func (m *schemasStore) findMaxSchemaID() uint32 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.findMaxSchemaID0()
+func (ss *schemasStore) findMaxSchemaID() uint32 {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.findMaxSchemaID0()
 }
 
-func (m *schemasStore) findMaxSchemaID0() uint32 {
-	if len(m.schemas) == 0 {
+func (ss *schemasStore) findMaxSchemaID0() uint32 {
+	if len(ss.schemas) == 0 {
 		return 0
 	}
-	if len(m.schemas) == 1 {
-		m.maxSchemaID = m.schemas[0].Id
-		return m.maxSchemaID
+	if len(ss.schemas) == 1 {
+		ss.maxSchemaID = ss.schemas[0].Id
+		return ss.maxSchemaID
 	}
 	max := uint32(0)
-	for _, schema := range m.schemas {
+	for _, schema := range ss.schemas {
 		if schema.Id > max {
 			max = schema.Id
 		}
 	}
-	atomic.StoreUint32(&m.maxSchemaID, max)
-	return atomic.LoadUint32(&m.maxSchemaID)
+	atomic.StoreUint32(&ss.maxSchemaID, max)
+	return atomic.LoadUint32(&ss.maxSchemaID)
 }
 
-func (m *schemasStore) nextSchemaID() uint32 {
-	return atomic.AddUint32(&m.maxSchemaID, 1)
+func (ss *schemasStore) nextSchemaID() uint32 {
+	return atomic.AddUint32(&ss.maxSchemaID, 1)
 }
 
-func (m *schemasStore) findMaxIndexID() uint32 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.findMaxSchemaID0()
+func (ss *schemasStore) findMaxIndexID() uint32 {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.findMaxSchemaID0()
 }
 
-func (m *schemasStore) findMaxIndexID0() uint32 {
-	if len(m.schemas) == 0 {
+func (ss *schemasStore) findMaxIndexID0() uint32 {
+	if len(ss.schemas) == 0 {
 		return 0
 	}
 	max := uint32(0)
-	for _, schema := range m.schemas {
+	for _, schema := range ss.schemas {
 		if len(schema.Collections) == 0 {
 			continue
 		}
@@ -92,62 +90,62 @@ func (m *schemasStore) findMaxIndexID0() uint32 {
 			}
 		}
 	}
-	atomic.StoreUint32(&m.maxSchemaID, max)
-	return atomic.LoadUint32(&m.maxSchemaID)
+	atomic.StoreUint32(&ss.maxSchemaID, max)
+	return atomic.LoadUint32(&ss.maxSchemaID)
 }
 
-func (m *schemasStore) nextIndexID() uint32 {
-	return atomic.AddUint32(&m.maxIndexID, 1)
+func (ss *schemasStore) nextIndexID() uint32 {
+	return atomic.AddUint32(&ss.maxIndexID, 1)
 }
 
-func (m *schemasStore) findMaxCollectionID() CollectionID {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.findMaxCollectionID0()
+func (ss *schemasStore) findMaxCollectionID() CollectionID {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.findMaxCollectionID0()
 }
 
-func (m *schemasStore) findMaxCollectionID0() CollectionID {
+func (ss *schemasStore) findMaxCollectionID0() CollectionID {
 	max := CollectionID(0)
-	for _, schema := range m.schemas {
+	for _, schema := range ss.schemas {
 		for _, col := range schema.Collections {
 			if col.Id > max {
 				max = col.Id
 			}
 		}
 	}
-	atomic.StoreUint32(&m.maxCollectionId, uint32(max))
-	return CollectionID(atomic.LoadUint32(&m.maxCollectionId))
+	atomic.StoreUint32(&ss.maxCollectionId, uint32(max))
+	return CollectionID(atomic.LoadUint32(&ss.maxCollectionId))
 }
 
 // nextCollectionID finds the next collection ID. It first will try incrementing
 // the latest Max if under a threshold. Above that threshold, it creates a sorted
 // list of all collection IDs then scans for the first monotonic gap.
-func (m *schemasStore) nextCollectionID() CollectionID {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (ss *schemasStore) nextCollectionID() CollectionID {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
 
-	max := CollectionID(m.maxCollectionId)
+	max := CollectionID(ss.maxCollectionId)
 	if max == 0 {
-		max = m.findMaxCollectionID0()
+		max = ss.findMaxCollectionID0()
 	}
 	if max == 0 {
-		atomic.StoreUint32(&m.maxCollectionId, uint32(minUserCollectionID))
-		return CollectionID(atomic.LoadUint32(&m.maxCollectionId))
+		atomic.StoreUint32(&ss.maxCollectionId, uint32(minUserCollectionID))
+		return CollectionID(atomic.LoadUint32(&ss.maxCollectionId))
 	}
 	// Fast path
 	if max < 32768 {
-		return CollectionID(atomic.AddUint32(&m.maxCollectionId, 1))
+		return CollectionID(atomic.AddUint32(&ss.maxCollectionId, 1))
 	}
 
 	// Create a sorted list of all IDs.
 	ids := make([]uint16, 0, 128)
-	for _, schema := range m.schemas {
+	for _, schema := range ss.schemas {
 		for _, col := range schema.Collections {
 			ids = append(ids, uint16(col.Id))
 		}
 	}
 	if len(ids) == 0 {
-		m.maxCollectionId = 1
+		ss.maxCollectionId = 1
 		return 1
 	}
 	sort.Sort(uint16Slice(ids))
@@ -161,17 +159,18 @@ func (m *schemasStore) nextCollectionID() CollectionID {
 		next++
 	}
 	// Out of IDs?
-	if atomic.LoadUint32(&m.maxCollectionId) == math.MaxUint16 {
+	if atomic.LoadUint32(&ss.maxCollectionId) == math.MaxUint16 {
 		return 0
 	}
 	// Add a new ID
-	return CollectionID(atomic.AddUint32(&m.maxCollectionId, 1))
+	return CollectionID(atomic.AddUint32(&ss.maxCollectionId, 1))
 }
 
 func openSchemaStore(s *Store) (*schemasStore, error) {
 	m := &schemasStore{
 		store:        s,
 		schemasByUID: make(map[string]*SchemaMeta),
+		evolutions:   make(map[string]*evolution),
 	}
 
 	// Use an update
@@ -230,8 +229,9 @@ func openSchemaStore(s *Store) (*schemasStore, error) {
 			for {
 				if err = cursor.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
 					if err == mdbx.ErrNotFound {
-						break loop
+						err = nil
 					}
+					break loop
 				}
 				if !addSchema() {
 					break loop

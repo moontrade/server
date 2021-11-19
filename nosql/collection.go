@@ -44,10 +44,11 @@ func (id *DocID) Key() mdbx.Val {
 type CollectionKind int
 
 const (
-	CollectionTypeCustom   CollectionKind = 0
-	CollectionTypeJson     CollectionKind = 1
-	CollectionTypeProto    CollectionKind = 2
-	CollectionTypeProtobuf CollectionKind = 3
+	CollectionTypeJson     CollectionKind = 0
+	CollectionTypeProto    CollectionKind = 1
+	CollectionTypeProtobuf CollectionKind = 2
+	CollectionTypeMsgpack  CollectionKind = 3
+	CollectionTypeCustom   CollectionKind = 10
 )
 
 type IndexKind int
@@ -71,7 +72,7 @@ type Collection struct {
 type CollectionMeta struct {
 	collectionDescriptor
 	Id      CollectionID `json:"id"`
-	Owner   int32        `json:"owner"`
+	Owner   uint32       `json:"owner"`
 	Created uint64       `json:"created"`
 	Updated uint64       `json:"updated"`
 	Indexes []IndexMeta  `json:"indexes,omitempty"`
@@ -192,98 +193,125 @@ func (s *collectionStore) NextID() DocID {
 	return NewDocID(s.id, atomic.AddUint64(&s.sequence, 1))
 }
 
-func (s *collectionStore) Insert(tx *Tx, data []byte, unmarshalled interface{}) (DocID, error) {
+func (s *collectionStore) Insert(
+	tx *Tx,
+	data []byte,
+	unmarshalled interface{},
+) (DocID, error) {
 	var (
-		k   = NewDocID(s.id, atomic.AddUint64(&s.sequence, 1))
-		key = docIDVal(&k)
-		val = mdbx.Bytes(&data)
-		d   = *(*string)(unsafe.Pointer(&data))
-		err error
+		id     = NewDocID(s.id, atomic.AddUint64(&s.sequence, 1))
+		key    = docIDVal(&id)
+		val    = mdbx.Bytes(&data)
+		d      = *(*string)(unsafe.Pointer(&data))
+		cursor = tx.Docs()
+		err    error
 	)
-	if err = tx.Tx.Put(s.store.documentsDBI, &key, &val, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
+	if err = cursor.Put(&key, &val, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
 		return 0, err
 	}
 	// Insert indexes
 	if len(s.indexes) > 0 {
+		tx.Index()
+		tx.doc = d
+		tx.docTyped = unmarshalled
 		for _, index := range s.indexes {
-			if err = index.insert(tx, k, d, unmarshalled); err != nil {
+			if err = index.doInsert(tx); err != nil {
 				return 0, err
 			}
 		}
 	}
-	return k, nil
+	return id, nil
 }
 
-func (s *collectionStore) Update(tx *Tx, id DocID, data []byte, unmarshalled interface{}) error {
+func (s *collectionStore) Update(
+	tx *Tx,
+	id DocID,
+	data []byte,
+	unmarshalled interface{},
+	prev func(val mdbx.Val),
+) error {
 	var (
-		key = docIDVal(&id)
-		val = mdbx.Bytes(&data)
-		d   = *(*string)(unsafe.Pointer(&data))
-		err error
+		key    = docIDVal(&id)
+		val    = mdbx.Bytes(&data)
+		d      = *(*string)(unsafe.Pointer(&data))
+		cursor = tx.Docs()
+		err    error
 	)
-	if err := tx.Tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
+
+	if err = cursor.Get(&key, &val, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+		return err
+	}
+	err = nil
+	if id != DocID(key.U64()) {
+		return mdbx.ErrNotFound
+	}
+
+	if err = cursor.Put(&key, &val, 0); err != mdbx.ErrSuccess {
 		return err
 	}
 	// Update indexes
 	if len(s.indexes) > 0 {
+		tx.Index()
+		tx.doc = d
+		tx.docTyped = unmarshalled
+		tx.prev = val.UnsafeString()
+		tx.prevTyped = nil
 		for _, index := range s.indexes {
-			if _, err = index.update(tx, id, d, unmarshalled); err != nil {
+			if err = index.doUpdate(tx); err != nil {
 				return err
 			}
 		}
 	}
+
+	if prev != nil {
+		prev(val)
+	}
 	return nil
 }
 
-func (s *collectionStore) Delete(tx *Tx, id DocID, unmarshalled interface{}) (bool, error) {
+func (s *collectionStore) Delete(
+	tx *Tx,
+	id DocID,
+	unmarshalled interface{},
+	prev func(val mdbx.Val),
+) (bool, error) {
 	var (
-		key = docIDVal(&id)
-		val = mdbx.Val{}
-		err error
+		key    = docIDVal(&id)
+		val    = mdbx.Val{}
+		cursor = tx.Docs()
+		err    error
 	)
-	if err := tx.Tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
-		if err == mdbx.ErrNotFound {
-			return false, nil
-		}
-		return false, err
-	}
-	// Delete indexes
-	if len(s.indexes) > 0 {
-		data := val.UnsafeBytes()
-		d := *(*string)(unsafe.Pointer(&data))
-		for _, index := range s.indexes {
-			if _, err = index.delete(tx, id, d, unmarshalled); err != nil {
-				return false, err
-			}
-		}
-	}
-	return true, nil
-}
 
-func (s *collectionStore) DeleteGet(tx *Tx, id DocID, unmarshalled interface{}, onData func(data mdbx.Val)) (bool, error) {
-	var (
-		key = docIDVal(&id)
-		val = mdbx.Val{}
-		err error
-	)
-	if err := tx.Tx.Put(s.store.documentsDBI, &key, &val, 0); err != mdbx.ErrSuccess {
+	if err = cursor.Get(&key, &val, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+		return false, err
+	}
+	err = nil
+	if id != DocID(key.U64()) {
+		return false, mdbx.ErrNotFound
+	}
+
+	if err := cursor.Delete(0); err != mdbx.ErrSuccess {
 		if err == mdbx.ErrNotFound {
 			return false, nil
 		}
 		return false, err
 	}
+
 	// Delete indexes
 	if len(s.indexes) > 0 {
+		tx.Index()
 		data := val.UnsafeBytes()
-		d := *(*string)(unsafe.Pointer(&data))
+		tx.doc = *(*string)(unsafe.Pointer(&data))
+		tx.docTyped = unmarshalled
 		for _, index := range s.indexes {
-			if _, err = index.delete(tx, id, d, unmarshalled); err != nil {
+			if err = index.doDelete(tx); err != nil {
 				return false, err
 			}
 		}
 	}
-	if onData != nil {
-		onData(val)
+
+	if prev != nil {
+		prev(val)
 	}
 	return true, nil
 }

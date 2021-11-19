@@ -7,7 +7,7 @@ require (
 	github.com/gomodule/redigo v1.8.5
 	github.com/hashicorp/go-hclog v1.0.0
 	github.com/hashicorp/raft v1.3.2
-	github.com/moontrade/mdbx-go v0.1.9
+	github.com/moontrade/mdbx-go v0.1.10
 	github.com/moontrade/nogc v0.1.1
 	github.com/rs/zerolog v1.25.0
 	github.com/tidwall/gjson v1.11.0

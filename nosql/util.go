@@ -1,9 +1,21 @@
 package nosql
 
 import (
+	"encoding/binary"
 	"sort"
 	"strings"
+	"unsafe"
 )
+
+func bigEndianI64(b []byte) int64 {
+	value := binary.BigEndian.Uint64(b)
+	return *(*int64)(unsafe.Pointer(&value))
+}
+
+func bigEndianF64(b []byte) float64 {
+	value := binary.BigEndian.Uint64(b)
+	return *(*float64)(unsafe.Pointer(&value))
+}
 
 // Copyright (c) 2017, A. Stoewer <adrian.stoewer@rz.ifi.lmu.de>
 // All rights reserved.
@@ -189,6 +201,26 @@ func (x uint32Slice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
 
 // Sort is a convenience method: x.Sort() calls Sort(x).
 func (x uint32Slice) Sort() { sort.Sort(x) }
+
+// int64Slice attaches the methods of Interface to []uint32, sorting in increasing order.
+type int64Slice []int64
+
+func (x int64Slice) Len() int           { return len(x) }
+func (x int64Slice) Less(i, j int) bool { return x[i] < x[j] }
+func (x int64Slice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
+
+// Sort is a convenience method: x.Sort() calls Sort(x).
+func (x int64Slice) Sort() { sort.Sort(x) }
+
+// float64Slice attaches the methods of Interface to []uint32, sorting in increasing order.
+type float64Slice []float64
+
+func (x float64Slice) Len() int           { return len(x) }
+func (x float64Slice) Less(i, j int) bool { return x[i] < x[j] }
+func (x float64Slice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
+
+// Sort is a convenience method: x.Sort() calls Sort(x).
+func (x float64Slice) Sort() { sort.Sort(x) }
 
 // collectionMetasSlice attaches the methods of Interface to []CollectionMeta, sorting in increasing order.
 type collectionMetasSlice []CollectionMeta

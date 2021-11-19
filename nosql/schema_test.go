@@ -1,6 +1,8 @@
 package nosql_test
 
 import (
+	"context"
+	"fmt"
 	"github.com/moontrade/mdbx-go"
 	"github.com/moontrade/server/nosql"
 	"testing"
@@ -17,20 +19,64 @@ func TestSchema(t *testing.T) {
 	}
 
 	var (
-		schema    = &Schema{}
-		nschema   *nosql.Schema
-		evolution *nosql.evolution
+		mySchema  = &MySchema{}
+		mySchema2 = &Schema2{}
+		schema    *nosql.Schema
+		progress  <-chan nosql.EvolutionProgress
 	)
-	if nschema, err = nosql.ParseSchemaWithUID("@", schema); err != nil {
+	if schema, err = nosql.ParseSchemaWithUID("@", mySchema); err != nil {
 		t.Fatal(err)
 	}
-	if evolution, err = store.Hydrate(nschema); err != nil {
+	if progress, err = store.Hydrate(context.Background(), schema); err != nil {
 		t.Fatal(err)
 	}
-	_, err = evolution.Apply()
+	wait(progress)
+
+	if schema, err = nosql.ParseSchemaWithUID("@", mySchema2); err != nil {
+		t.Fatal(err)
+	}
+	if progress, err = store.Hydrate(context.Background(), schema); err != nil {
+		t.Fatal(err)
+	}
+	wait(progress)
 }
 
-type Schema struct {
+func wait(progress <-chan nosql.EvolutionProgress) {
+	if progress == nil {
+		fmt.Println("schema does not require an evolution")
+		return
+	}
+LOOP:
+	for {
+		select {
+		case p, ok := <-progress:
+			if !ok {
+				break LOOP
+			}
+			switch p.State {
+			case nosql.EvolutionStateError:
+				break LOOP
+			case nosql.EvolutionStateCompleted:
+				break LOOP
+			case nosql.EvolutionStatePreparing:
+				fmt.Println("preparing...")
+			case nosql.EvolutionStatePrepared:
+				fmt.Println("prepared")
+			case nosql.EvolutionStateDroppingIndex:
+				fmt.Printf("dropping indexes: %.1f%s", p.IndexDrops.Pct()*100, "%\n")
+				fmt.Printf("total progress: %.1f%s", p.Pct()*100, "%\n")
+			case nosql.EvolutionStateCreatingIndex:
+				fmt.Printf("creating indexes: %.1f%s", p.IndexCreates.Pct()*100, "%\n")
+				fmt.Printf("total progress: %.1f%s", p.Pct()*100, "%\n")
+			case nosql.EvolutionStateDroppingCollection:
+				fmt.Printf("dropping collections: %.1f%s", p.CollectionDrops.Pct()*100, "%\n")
+				fmt.Printf("total progress: %.1f%s", p.Pct()*100, "%\n")
+			}
+		}
+	}
+}
+
+type MySchema struct {
 	*nosql.Schema
 
 	Orders struct {
@@ -49,17 +95,18 @@ type Schema struct {
 
 	Markets struct {
 		nosql.Collection
-		Num   nosql.Int64  `@:"num"`
-		Key   nosql.String `@:"key"`
-		Name  nosql.String `@:"name"`
-		Names struct {
-			First nosql.String `sort:"ASC"`
-			Last  nosql.String `sort:"DESC"`
-		} `@:"[name.first,age,children.0]"` // Composite index
+		Num  nosql.Int64  `@:"num"`
+		Key  nosql.String `@:"key"`
+		Name nosql.String `@:"name"`
+		//Names struct {
+		//	First nosql.String `sort:"ASC"`
+		//	Last  nosql.String `sort:"DESC"`
+		//} `@:"[name.first,age,children.0]"` // Composite index
 	}
 }
 
 type Schema2 struct {
+	*nosql.Schema
 	Orders Orders
 
 	Items struct {
@@ -85,10 +132,6 @@ type Order struct {
 	Num   uint64  `json:"num"`
 	Key   string  `json:"key"`
 	Price float64 `json:"price"`
-	Name  struct {
-		First string `json:"first"`
-		Last  string `json:"last"`
-	} `json:"name"`
 }
 
 type Orders struct {

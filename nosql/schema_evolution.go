@@ -2,10 +2,16 @@ package nosql
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/moontrade/mdbx-go"
 	"sync"
 	"time"
+)
+
+var (
+	ErrEvolutionInProcess = errors.New("evolution in process")
 )
 
 // evolution is a set of ChangeActions required to perform in order to get the
@@ -44,6 +50,8 @@ const (
 
 type EvolutionProgress struct {
 	ProgressStat
+	Context              context.Context
+	Cancel               context.CancelFunc
 	Time                 time.Time
 	Started              time.Time
 	Prepared             time.Duration
@@ -73,21 +81,21 @@ func (p ProgressStat) Pct() float64 {
 	return float64(p.Completed) / float64(p.Total)
 }
 
-func (evol *evolution) NeedsApply() bool {
-	evol.mu.Lock()
-	defer evol.mu.Unlock()
-	if !evol.completed.IsZero() {
+func (ev *evolution) NeedsApply() bool {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if !ev.completed.IsZero() {
 		return false
 	}
-	return evol.needsApply()
+	return ev.needsApply()
 }
 
-func (evol *evolution) needsApply() bool {
-	return len(evol.creates) == 0 ||
-		len(evol.drops) > 0 ||
-		len(evol.indexCreates) > 0 ||
-		len(evol.indexRebuilds) > 0 ||
-		len(evol.indexDrops) > 0
+func (ev *evolution) needsApply() bool {
+	return len(ev.creates) == 0 ||
+		len(ev.drops) > 0 ||
+		len(ev.indexCreates) > 0 ||
+		len(ev.indexRebuilds) > 0 ||
+		len(ev.indexDrops) > 0
 }
 
 type ChangeKind int
@@ -130,49 +138,110 @@ type IndexDrop struct {
 	store *indexStore
 }
 
-func (m *schemasStore) hydrate(ctx context.Context, nextSchema *Schema) (chan EvolutionProgress, error) {
+func (ss *schemasStore) hydrate(
+	ctx context.Context,
+	schema *Schema,
+) (<-chan EvolutionProgress, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	cs := &evolution{
-		store:  m,
-		to:     nextSchema.buildMeta(),
-		ctx:    ctx,
-		cancel: cancel,
+	ev := &evolution{
+		store:      ss,
+		schema:     schema,
+		ctx:        ctx,
+		cancel:     cancel,
+		chProgress: make(chan EvolutionProgress, 1),
 	}
-	m.mu.Lock()
-	cs.from = m.schemasByUID[nextSchema.Meta.UID]
-	m.mu.Unlock()
+	ss.mu.Lock()
+	ev.from = ss.schemasByUID[schema.Meta.UID]
+	existing := ss.evolutions[schema.Meta.UID]
+	if existing != nil {
+		ss.mu.Unlock()
+		return nil, ErrEvolutionInProcess
+	}
+	ss.evolutions[schema.Meta.UID] = ev
+	ss.mu.Unlock()
 
-	if cs.from != nil {
+	createCollection := func(col Collection) (Collection, error) {
+		if col.collectionStore == nil {
+			col.collectionStore = &collectionStore{
+				store: ss.store,
+			}
+		}
+		col.collectionStore.store = ss.store
+
+		collectionMeta := col.CollectionMeta
+		collectionMeta.Id = ss.nextCollectionID()
+		collectionMeta.Owner = schema.Meta.Id
+		collectionMeta.Name = col.Name
+		if collectionMeta.Id == 0 {
+			return col, ErrCollectionIDExhaustion
+		}
+		collectionMeta.Indexes = make([]IndexMeta, len(col.indexes))
+		for i := 0; i < len(col.indexes); i++ {
+			index := col.indexes[i]
+			idxStore := index.getStore()
+			if idxStore == nil {
+				idxStore = &indexStore{}
+			}
+			idxStore.store = ss.store
+			idxStore.collection = col.collectionStore
+			idxStore.index = index
+			index.setStore(idxStore)
+
+			indexMeta := index.Meta()
+			indexMeta.ID = ss.nextIndexID()
+			if indexMeta.ID == 0 {
+				return col, ErrIndexIDExhaustion
+			}
+			indexMeta.Owner = collectionMeta.Id
+			collectionMeta.Indexes[i] = indexMeta
+			index.setMeta(indexMeta)
+		}
+
+		col.CollectionMeta = collectionMeta
+		ev.creates = append(ev.creates, &CollectionCreate{
+			meta:  collectionMeta,
+			store: col.collectionStore,
+		})
+		return col, nil
+	}
+
+	if ev.from != nil {
+		schema.Meta.Id = ev.from.Id
 		existingCollections := make(map[string]CollectionMeta)
-		for _, col := range cs.from.Collections {
+		for _, col := range ev.from.Collections {
 			existingCollections[col.Name] = col
 		}
 
 		nextCollections := make(map[string]*collectionStore)
-		collections := make([]*collectionStore, len(nextSchema.Collections))
-		for i, col := range nextSchema.Collections {
-			collections[i] = col.collectionStore
-			if collections[i] == nil {
-				return nil, ErrCollectionStore
+		for i := 0; i < len(schema.Collections); i++ {
+			collection := schema.Collections[i]
+			if nextCollections[collection.Name] != nil {
+				return nil, fmt.Errorf("duplicate collection name used: %s", collection.Name)
 			}
-			if nextCollections[col.Name] != nil {
-				return nil, fmt.Errorf("duplicate collection name used: %s", col.Name)
+			nextCollections[collection.Name] = collection.collectionStore
+
+		}
+		for _, collection := range schema.Collections {
+			if nextCollections[collection.Name] != nil {
+				return nil, fmt.Errorf("duplicate collection name used: %s", collection.Name)
 			}
-			nextCollections[col.Name] = col.collectionStore
+			nextCollections[collection.Name] = collection.collectionStore
 		}
 
-		for _, col := range collections {
+		for i := 0; i < len(schema.Collections); i++ {
+			col := schema.Collections[i]
 			existingCollection, ok := existingCollections[col.Name]
 			if !ok {
-				col.CollectionMeta.Id = m.nextCollectionID()
-				if col.CollectionMeta.Id == 0 {
-					return nil, ErrCollectionIDExhaustion
+				var err error
+				if col, err = createCollection(col); err != nil {
+					return nil, err
 				}
-				cs.creates = append(cs.creates, &CollectionCreate{
-					meta:  col.CollectionMeta,
-					store: col,
-				})
+				schema.Collections[i] = col
 			} else {
+				col.CollectionMeta.Id = existingCollection.Id
+				col.CollectionMeta.Owner = existingCollection.Owner
+				col.CollectionMeta.Name = col.Name
+
 				// Was anything changed on collection?
 				if !col.CollectionMeta.Equals(&existingCollection.collectionDescriptor) {
 					// NOOP
@@ -187,11 +256,23 @@ func (m *schemasStore) hydrate(ctx context.Context, nextSchema *Schema) (chan Ev
 					indexRebuilds []*IndexRebuild
 					indexDrops    []*IndexDrop
 				)
-				for _, index := range col.indexes {
+				for i := 0; i < len(col.indexes); i++ {
+					index := col.indexes[i]
+					idxStore := index.getStore()
+					if idxStore == nil {
+						idxStore = &indexStore{}
+						index.setStore(idxStore)
+					}
+					idxStore.store = ss.store
+					idxStore.collection = col.collectionStore
+					idxStore.index = index
+					index.setStore(idxStore)
+
 					to := index.Meta()
+					to.Owner = col.Id
 					from, ok := existingIndexes[index.Name()]
 					if !ok {
-						to.ID = m.nextIndexID()
+						to.ID = ss.nextIndexID()
 						if to.ID == 0 {
 							return nil, ErrIndexIDExhaustion
 						}
@@ -203,7 +284,9 @@ func (m *schemasStore) hydrate(ctx context.Context, nextSchema *Schema) (chan Ev
 					} else {
 						delete(existingIndexes, index.Name())
 						to.ID = from.ID
-						if to.didChange(from) {
+						to.Owner = from.Owner
+						index.setMeta(to)
+						if !to.equals(from) {
 							indexRebuilds = append(indexRebuilds, &IndexRebuild{
 								from:  from,
 								to:    to,
@@ -221,24 +304,26 @@ func (m *schemasStore) hydrate(ctx context.Context, nextSchema *Schema) (chan Ev
 				}
 
 				if len(indexCreates) > 0 {
-					cs.indexCreates = append(cs.indexCreates, indexCreates...)
+					ev.indexCreates = append(ev.indexCreates, indexCreates...)
 				}
 				if len(indexRebuilds) > 0 {
-					cs.indexRebuilds = append(cs.indexRebuilds, indexRebuilds...)
+					ev.indexRebuilds = append(ev.indexRebuilds, indexRebuilds...)
 				}
 				if len(indexDrops) > 0 {
-					cs.indexDrops = append(cs.indexDrops, indexDrops...)
+					ev.indexDrops = append(ev.indexDrops, indexDrops...)
 				}
 
 				// Remove from existingCollections map.
 				delete(existingCollections, col.Name)
+
+				schema.Collections[i] = col
 			}
 		}
 
 		// Anything remaining in existingCollections map needs to be dropped.
 		if len(existingCollections) > 0 {
 			for _, collection := range existingCollections {
-				cs.drops = append(cs.drops, &CollectionDrop{
+				ev.drops = append(ev.drops, &CollectionDrop{
 					meta:  collection,
 					store: nil,
 				})
@@ -246,7 +331,7 @@ func (m *schemasStore) hydrate(ctx context.Context, nextSchema *Schema) (chan Ev
 				// Drop all indexes
 				if len(collection.Indexes) > 0 {
 					for _, index := range collection.Indexes {
-						cs.indexDrops = append(cs.indexDrops, &IndexDrop{
+						ev.indexDrops = append(ev.indexDrops, &IndexDrop{
 							meta:  index,
 							store: nil,
 						})
@@ -254,80 +339,103 @@ func (m *schemasStore) hydrate(ctx context.Context, nextSchema *Schema) (chan Ev
 				}
 			}
 		}
+
+		//if !ev.needsApply() {
+		//	ss.mu.Lock()
+		//	delete(ss.evolutions, schema.Meta.UID)
+		//	ss.mu.Unlock()
+		//	return nil, nil
+		//}
 	} else {
-		cs.to.Id = m.nextSchemaID()
-		cs.creates = make([]*CollectionCreate, len(nextSchema.Collections))
-
-		for i, col := range nextSchema.Collections {
-			if col.collectionStore == nil {
-				col.collectionStore = &collectionStore{
-					store: m.store,
-				}
+		schema.Meta.Id = ss.nextIndexID()
+		ev.creates = make([]*CollectionCreate, 0, len(schema.Collections))
+		for i := 0; i < len(schema.Collections); i++ {
+			col := schema.Collections[i]
+			var err error
+			if col, err = createCollection(col); err != nil {
+				return nil, err
 			}
-			col.collectionStore.store = m.store
-			col.CollectionMeta.Id = m.nextCollectionID()
-
-			cs.creates[i] = &CollectionCreate{
-				meta:  col.CollectionMeta,
-				store: col.collectionStore,
-			}
+			schema.Collections[i] = col
 		}
 	}
 
-	return cs.Apply()
+	ev.to = schema.buildMeta()
+
+	return ev.apply()
 }
 
-func (evol *evolution) Apply() (chan EvolutionProgress, error) {
-	evol.mu.Lock()
-	defer evol.mu.Unlock()
-
-	if !evol.completed.IsZero() {
-		return nil, nil
+func (ev *evolution) Close() error {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if ev.cancel != nil {
+		ev.cancel()
+		ev.cancel = nil
 	}
-	if evol.chProgress != nil {
-		return evol.chProgress, nil
-	}
-	evol.chProgress = make(chan EvolutionProgress, 1)
-	chProgress := evol.chProgress
+	return nil
+}
 
+func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	chProgress := ev.chProgress
 	go func() {
+		var (
+			err       error
+			uid       = ev.to.UID
+			batchSize = int64(100000)
+			nstore    = ev.store.store
+			store     = ev.store.store.store
+			docsDBI   = ev.store.store.documentsDBI
+			indexDBI  = ev.store.store.indexDBI
+			progress  = EvolutionProgress{
+				Context: ev.ctx,
+				Cancel:  ev.cancel,
+				State:   EvolutionStatePreparing,
+				Started: time.Now(),
+			}
+		)
+
 		defer func() {
 			recover()
-			evol.mu.Lock()
-			if evol.chProgress != nil {
-				close(evol.chProgress)
+			ev.mu.Lock()
+			defer ev.mu.Unlock()
+
+			delete(ev.store.evolutions, uid)
+			if ev.err == nil {
+				ev.store.schemasByUID[ev.to.UID] = ev.to
 			}
-			if evol.cancel != nil {
-				evol.cancel()
-				evol.cancel = nil
+			ev.completed = time.Now()
+			if ev.chProgress != nil {
+				close(ev.chProgress)
+			}
+			if ev.ctx != nil {
+				ev.ctx.Value(progress)
+			}
+			if ev.cancel != nil {
+				ev.cancel()
+				ev.cancel = nil
 			}
 		}()
 
+		ev.ctx.Value(progress)
+		chProgress <- progress
+
 		var (
-			err              error
-			batchSize        = int64(100000)
-			store            = evol.store.store.store
-			docsDBI          = evol.store.store.documentsDBI
-			indexDBI         = evol.store.store.indexDBI
-			progress         = EvolutionProgress{}
 			collectionCounts = make(map[CollectionID]int64)
 			collectionDrops  = make(map[CollectionID]*CollectionDrop)
 			indexDrops       = make(map[uint32]*IndexDrop)
 			indexCreates     = make(map[uint32]*IndexCreate)
 		)
-		evol.ctx.Value(progress)
-		progress.State = EvolutionStatePreparing
-		progress.Started = time.Now()
 
-		if len(evol.drops) > 0 {
-			for _, drop := range evol.drops {
+		if len(ev.drops) > 0 {
+			for _, drop := range ev.drops {
 				collectionCounts[drop.meta.Id] = -1
 				collectionDrops[drop.meta.Id] = drop
 			}
 		}
 
-		if len(evol.indexCreates) > 0 {
-			for _, create := range evol.indexCreates {
+		if len(ev.indexCreates) > 0 {
+			for _, create := range ev.indexCreates {
 				if _, ok := collectionDrops[create.meta.Owner]; ok {
 					continue
 				}
@@ -336,15 +444,15 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 			}
 		}
 
-		if len(evol.indexDrops) > 0 {
-			for _, drop := range evol.indexDrops {
+		if len(ev.indexDrops) > 0 {
+			for _, drop := range ev.indexDrops {
 				collectionCounts[drop.meta.Owner] = -1
 				indexDrops[drop.meta.ID] = drop
 			}
 		}
 
-		if len(evol.indexRebuilds) > 0 {
-			for _, rebuild := range evol.indexRebuilds {
+		if len(ev.indexRebuilds) > 0 {
+			for _, rebuild := range ev.indexRebuilds {
 				if _, ok := collectionDrops[rebuild.to.Owner]; ok {
 					continue
 				}
@@ -379,7 +487,7 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 								meta:  meta,
 								store: index.getStore(),
 							}
-							evol.indexDrops = append(evol.indexDrops, indexDrop)
+							ev.indexDrops = append(ev.indexDrops, indexDrop)
 							indexDrops[meta.ID] = indexDrop
 						}
 					}
@@ -389,7 +497,7 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 
 		// collection counts
 		for collectionID := range collectionCounts {
-			count, err := evol.store.store.EstimateCollectionCount(collectionID)
+			count, err := ev.store.store.EstimateCollectionCount(collectionID)
 			if err != nil {
 				continue
 			}
@@ -415,13 +523,34 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 		progress.State = EvolutionStatePrepared
 		chProgress <- progress
 
+		// Cancelled?
+		select {
+		case <-ev.ctx.Done():
+			goto DONE
+		default:
+		}
+
 		// Drop indexes?
 		if len(indexDrops) > 0 {
+			// Cancelled?
+			select {
+			case <-ev.ctx.Done():
+				goto DONE
+			default:
+			}
+
 			// drop indexes
 			progress.State = EvolutionStateDroppingIndex
 			chProgress <- progress
 
 			for _, drop := range indexDrops {
+				// Cancelled?
+				select {
+				case <-ev.ctx.Done():
+					goto DONE
+				default:
+				}
+
 				var (
 					collectionID = drop.meta.Owner
 					prefix       = drop.meta.ID
@@ -432,6 +561,13 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 					estimated    = collectionCounts[collectionID]
 				)
 				for err == nil {
+					// Cancelled?
+					select {
+					case <-ev.ctx.Done():
+						goto DONE
+					default:
+					}
+
 					err = store.Update(func(tx *mdbx.Tx) error {
 						var (
 							cursor *mdbx.Cursor
@@ -464,13 +600,16 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 							}
 						}
 					})
+					if err == mdbx.ErrSuccess {
+						err = nil
+					}
 
 					progress.IndexDrops.Completed += count
 					total += count
 					count = 0
 					chProgress <- progress
 				}
-				if err == mdbx.ErrNotFound {
+				if err == mdbx.ErrSuccess || err == mdbx.ErrNotFound {
 					err = nil
 				}
 				if err != nil {
@@ -488,56 +627,98 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 
 		// Create indexes?
 		if len(indexCreates) > 0 {
+			// Cancelled?
+			select {
+			case <-ev.ctx.Done():
+				goto DONE
+			default:
+			}
+
 			progress.State = EvolutionStateCreatingIndex
 			chProgress <- progress
 
 			for _, create := range indexCreates {
+				// Cancelled?
+				select {
+				case <-ev.ctx.Done():
+					goto DONE
+				default:
+				}
+
 				var (
+					index        = create.store.index
 					collectionID = create.meta.Owner
-					prefix       = create.meta.ID
-					key          = mdbx.U32(&prefix)
-					data         = mdbx.Val{}
+					docID        = NewDocID(create.meta.Owner, 0)
+					docKey       = docID.Key()
+					docData      = mdbx.Val{}
 					count        = int64(0)
 					total        = int64(0)
 					estimated    = collectionCounts[collectionID]
 				)
 				for err == nil {
+					// Cancelled?
+					select {
+					case <-ev.ctx.Done():
+						goto DONE
+					default:
+					}
+
 					err = store.Update(func(tx *mdbx.Tx) error {
 						var (
-							cursor *mdbx.Cursor
-							e      error
+							docsCursor *mdbx.Cursor
+							e          error
 						)
 
-						cursor, e = tx.OpenCursor(indexDBI)
+						nstore.tx.Tx = tx
+						nstore.tx.index, e = tx.OpenCursor(indexDBI)
 						if e != mdbx.ErrSuccess {
 							return e
 						}
-						defer cursor.Close()
+						defer func() {
+							nstore.tx.Tx = nil
+						}()
+						defer nstore.tx.index.Close()
+
+						docsCursor, e = tx.OpenCursor(docsDBI)
+						if e != mdbx.ErrSuccess {
+							return e
+						}
+						defer docsCursor.Close()
 
 						for {
-							if e = cursor.Get(&key, &data, mdbx.CursorNextNoDup); e != mdbx.ErrSuccess {
+							if e = docsCursor.Get(&docKey, &docData, mdbx.CursorNextNoDup); e != mdbx.ErrSuccess {
 								return e
 							}
 
-							if key.Len < 4 {
+							if docKey.Len < 8 {
 								return mdbx.ErrNotFound
 							}
-							if key.U32() != prefix {
+							docID = DocID(docKey.U64())
+							if docID.CollectionID() != collectionID {
 								return mdbx.ErrNotFound
 							}
+
+							// Insert index
+							if e = index.doInsert(&nstore.tx); e != nil {
+								return e
+							}
+
 							count++
 							if count >= batchSize {
 								return nil
 							}
 						}
 					})
+					if err == mdbx.ErrSuccess {
+						err = nil
+					}
 
 					progress.IndexCreates.Completed += count
 					total += count
 					count = 0
 					chProgress <- progress
 				}
-				if err == mdbx.ErrNotFound {
+				if err == mdbx.ErrSuccess || err == mdbx.ErrNotFound {
 					err = nil
 				}
 				if err != nil {
@@ -555,10 +736,24 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 
 		// Drop collections?
 		if len(collectionDrops) > 0 {
+			// Cancelled?
+			select {
+			case <-ev.ctx.Done():
+				goto DONE
+			default:
+			}
+
 			progress.State = EvolutionStateDroppingCollection
 			chProgress <- progress
 
 			for _, drop := range collectionDrops {
+				// Cancelled?
+				select {
+				case <-ev.ctx.Done():
+					goto DONE
+				default:
+				}
+
 				var (
 					collectionID = drop.meta.Id
 					k            = NewDocID(collectionID, 0)
@@ -570,6 +765,13 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 					estimated    = collectionCounts[collectionID]
 				)
 				for err == nil {
+					// Cancelled?
+					select {
+					case <-ev.ctx.Done():
+						goto DONE
+					default:
+					}
+
 					err = store.Update(func(tx *mdbx.Tx) error {
 						var (
 							cursor *mdbx.Cursor
@@ -599,8 +801,8 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 							}
 						}
 					})
-					if err != nil {
-						break
+					if err == mdbx.ErrSuccess {
+						err = nil
 					}
 
 					progress.CollectionDrops.Completed += count
@@ -609,7 +811,7 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 					count = 0
 					chProgress <- progress
 				}
-				if err == mdbx.ErrNotFound {
+				if err == mdbx.ErrSuccess || err == mdbx.ErrNotFound {
 					err = nil
 				}
 				if err != nil {
@@ -625,25 +827,40 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 			now = progress.Time
 		}
 
+		// Cancelled?
+		select {
+		case <-ev.ctx.Done():
+			goto DONE
+		default:
+		}
+
 		// Save schema.
-		err = store.Update(func(tx *mdbx.Tx) error {
+		if err = store.Update(func(tx *mdbx.Tx) error {
 			var (
-				k    = NewDocID(schemaCollectionID, uint64(evol.to.Id))
+				k    = NewDocID(schemaCollectionID, uint64(ev.to.Id))
 				key  = k.Key()
 				data = mdbx.Val{}
 			)
+
+			bytes, err := json.Marshal(ev.to)
+			if err != nil {
+				return err
+			}
+			data = mdbx.Bytes(&bytes)
 
 			if e := tx.Put(docsDBI, &key, &data, 0); e != mdbx.ErrSuccess {
 				return e
 			}
 			return nil
-		})
-
-		// force sync to disk
-		if err = store.Sync(); err != nil {
+		}); err != nil {
 			goto DONE
 		}
-		if err = store.Sync(); err != nil {
+
+		// force sync to disk
+		if err = store.Sync(); err != mdbx.ErrSuccess && err != mdbx.ErrResultTrue && err != nil {
+			goto DONE
+		}
+		if err = store.Sync(); err != mdbx.ErrSuccess && err != mdbx.ErrResultTrue && err != nil {
 			goto DONE
 		}
 
@@ -655,14 +872,17 @@ func (evol *evolution) Apply() (chan EvolutionProgress, error) {
 		}
 
 	DONE:
+		if err == nil {
+			err = ev.ctx.Err()
+		}
 		if err != nil {
 			progress.Err = err
 			progress.State = EvolutionStateError
-			evol.err = err
-			evol.chProgress <- progress
+			ev.err = err
+			ev.chProgress <- progress
 		} else {
 			progress.State = EvolutionStateCompleted
-			evol.chProgress <- progress
+			ev.chProgress <- progress
 		}
 	}()
 

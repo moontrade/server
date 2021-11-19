@@ -8,12 +8,12 @@ import (
 )
 
 var (
-	DefaultLogGeometry = mdbx.Geometry{
-		SizeLower:       1024 * 1024,
-		SizeNow:         1024 * 1024,
-		SizeUpper:       1024 * 1024 * 1024 * 16,
-		GrowthStep:      1024 * 1024 * 4,
-		ShrinkThreshold: 1024 * 1024 * 4 * 2,
+	DefaultGeometry = mdbx.Geometry{
+		SizeLower:       Megabyte * 1,
+		SizeNow:         Megabyte * 1,
+		SizeUpper:       Gigabyte * 32,
+		GrowthStep:      Megabyte * 4,
+		ShrinkThreshold: Megabyte * 4 * 2,
 		PageSize:        4096,
 	}
 )
@@ -50,12 +50,17 @@ const (
 		mdbx.EnvLIFOReclaim |
 		mdbx.EnvNoMemInit |
 		mdbx.EnvCoalesce
+
+	Kilobyte = 1024
+	Megabyte = 1024 * 1024
+	Gigabyte = Megabyte * 1024
+	Terabyte = Gigabyte * 1024
 )
 
 const (
 	kvDBI        = "kv"
 	documentsDBI = "docs"
-	indexDBI     = "idx"
+	indexDBI     = "index"
 )
 
 var (
@@ -64,7 +69,6 @@ var (
 
 // Store is a simple embedded Raft replicated ACID noSQL database
 // built on MDBX B+Tree storage.
-//
 type Store struct {
 	config       *Config
 	store        *mdbx.Store // mdbx store
@@ -73,6 +77,7 @@ type Store struct {
 	indexDBI     mdbx.DBI    // indexes database
 	streamDBI    mdbx.DBI    // streams database
 	schemas      *schemasStore
+	tx           Tx
 	mu           sync.Mutex
 }
 
@@ -114,7 +119,7 @@ func Open(config *Config) (*Store, error) {
 				return e
 			}
 			// Set geometry
-			if e := env.SetGeometry(DefaultLogGeometry); e != mdbx.ErrSuccess {
+			if e := env.SetGeometry(DefaultGeometry); e != mdbx.ErrSuccess {
 				return e
 			}
 			//}
