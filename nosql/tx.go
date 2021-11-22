@@ -10,6 +10,7 @@ type Tx struct {
 	index     *mdbx.Cursor
 	indexBind bool
 	docID     DocID
+	errDocID  DocID
 	doc       string
 	docTyped  interface{}
 	prev      string
@@ -23,16 +24,16 @@ type Tx struct {
 func NewTx(s *Store) *Tx {
 	return &Tx{
 		store:     s,
-		docs:      mdbx.NewCursor(),
+		docs:      nil,
 		docsBind:  false,
-		index:     mdbx.NewCursor(),
+		index:     nil,
 		indexBind: false,
 		docID:     0,
 		doc:       "",
 		docTyped:  nil,
 		prev:      "",
 		prevTyped: nil,
-		buffer:    nil,
+		buffer:    make([]byte, 8192),
 		i64:       nil,
 		f64:       nil,
 		str:       nil,
@@ -41,8 +42,16 @@ func NewTx(s *Store) *Tx {
 
 func (tx *Tx) Docs() *mdbx.Cursor {
 	if !tx.docsBind {
-		if e := tx.Tx.Bind(tx.docs, tx.store.documentsDBI); e != mdbx.ErrSuccess {
-			panic(e)
+		if tx.docs == nil {
+			var err mdbx.Error
+			tx.docs, err = tx.Tx.OpenCursor(tx.store.documentsDBI)
+			if err != mdbx.ErrSuccess {
+				panic(err)
+			}
+		} else {
+			if e := tx.docs.Renew(tx.Tx); e != mdbx.ErrSuccess {
+				panic(e)
+			}
 		}
 		tx.docsBind = true
 	}
@@ -51,15 +60,24 @@ func (tx *Tx) Docs() *mdbx.Cursor {
 
 func (tx *Tx) Index() *mdbx.Cursor {
 	if !tx.indexBind {
-		if e := tx.Tx.Bind(tx.index, tx.store.indexDBI); e != mdbx.ErrSuccess {
-			panic(e)
+		if tx.index == nil {
+			var err mdbx.Error
+			tx.index, err = tx.Tx.OpenCursor(tx.store.indexDBI)
+			if err != mdbx.ErrSuccess {
+				panic(err)
+			}
+		} else {
+			if e := tx.index.Renew(tx.Tx); e != mdbx.ErrSuccess {
+				panic(e)
+			}
 		}
 		tx.indexBind = true
 	}
 	return tx.docs
 }
 
-func (tx *Tx) Reset() {
+func (tx *Tx) Reset(txn *mdbx.Tx) {
+	tx.Tx = txn
 	tx.docsBind = false
 	tx.indexBind = false
 	tx.doc = ""
@@ -77,5 +95,7 @@ func (tx *Tx) Close() {
 		_ = tx.index.Close()
 		tx.index = nil
 	}
-	tx.Reset()
+	if tx.Tx != nil {
+
+	}
 }

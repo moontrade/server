@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/moontrade/mdbx-go"
+	"sort"
 	"sync"
 	"time"
 )
@@ -150,6 +151,7 @@ func (ss *schemasStore) hydrate(
 		cancel:     cancel,
 		chProgress: make(chan EvolutionProgress, 1),
 	}
+	schema.store = ss.store
 	ss.mu.Lock()
 	ev.from = ss.schemasByUID[schema.Meta.UID]
 	existing := ss.evolutions[schema.Meta.UID]
@@ -218,13 +220,7 @@ func (ss *schemasStore) hydrate(
 			if nextCollections[collection.Name] != nil {
 				return nil, fmt.Errorf("duplicate collection name used: %s", collection.Name)
 			}
-			nextCollections[collection.Name] = collection.collectionStore
-
-		}
-		for _, collection := range schema.Collections {
-			if nextCollections[collection.Name] != nil {
-				return nil, fmt.Errorf("duplicate collection name used: %s", collection.Name)
-			}
+			collection.collectionStore.store = ss.store
 			nextCollections[collection.Name] = collection.collectionStore
 		}
 
@@ -393,6 +389,7 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 				State:   EvolutionStatePreparing,
 				Started: time.Now(),
 			}
+			now = time.Now()
 		)
 
 		defer func() {
@@ -421,15 +418,15 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 		chProgress <- progress
 
 		var (
-			collectionCounts = make(map[CollectionID]int64)
-			collectionDrops  = make(map[CollectionID]*CollectionDrop)
-			indexDrops       = make(map[uint32]*IndexDrop)
-			indexCreates     = make(map[uint32]*IndexCreate)
+			collectionsToLoad = make(map[CollectionID]*collectionStore)
+			collectionDrops   = make(map[CollectionID]*CollectionDrop)
+			indexDrops        = make(map[uint32]*IndexDrop)
+			indexCreates      = make(map[uint32]*IndexCreate)
 		)
 
 		if len(ev.drops) > 0 {
 			for _, drop := range ev.drops {
-				collectionCounts[drop.meta.Id] = -1
+				collectionsToLoad[drop.meta.Id] = drop.store
 				collectionDrops[drop.meta.Id] = drop
 			}
 		}
@@ -439,14 +436,14 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 				if _, ok := collectionDrops[create.meta.Owner]; ok {
 					continue
 				}
-				collectionCounts[create.meta.Owner] = -1
+				collectionsToLoad[create.meta.Owner] = create.store.collection
 				indexCreates[create.meta.ID] = create
 			}
 		}
 
 		if len(ev.indexDrops) > 0 {
 			for _, drop := range ev.indexDrops {
-				collectionCounts[drop.meta.Owner] = -1
+				collectionsToLoad[drop.meta.Owner] = drop.store.collection
 				indexDrops[drop.meta.ID] = drop
 			}
 		}
@@ -456,7 +453,7 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 				if _, ok := collectionDrops[rebuild.to.Owner]; ok {
 					continue
 				}
-				collectionCounts[rebuild.to.Owner] = -1
+				collectionsToLoad[rebuild.to.Owner] = rebuild.store.collection
 				if _, ok := indexDrops[rebuild.to.ID]; !ok {
 					indexDrops[rebuild.to.ID] = &IndexDrop{
 						meta:  rebuild.to,
@@ -474,7 +471,7 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 
 		if len(collectionDrops) > 0 {
 			for _, drop := range collectionDrops {
-				collectionCounts[drop.meta.Id] = -1
+				collectionsToLoad[drop.meta.Id] = drop.store
 				if len(drop.meta.Indexes) > 0 {
 					for _, index := range drop.store.indexes {
 						meta := index.Meta()
@@ -495,30 +492,64 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 			}
 		}
 
-		// collection counts
-		for collectionID := range collectionCounts {
-			count, err := ev.store.store.EstimateCollectionCount(collectionID)
-			if err != nil {
-				continue
+		if len(collectionsToLoad) > 0 {
+			// Sort by ID
+			list := make([]*collectionStore, 0, len(collectionsToLoad))
+			for _, cs := range collectionsToLoad {
+				list = append(list, cs)
 			}
-			collectionCounts[collectionID] = count
+			sort.Sort(collectionStoresSlice(list))
+
+			if err = store.View(func(tx *mdbx.Tx) error {
+				var (
+					begin, end *mdbx.Cursor
+					err        error
+				)
+				begin, err = tx.OpenCursor(docsDBI)
+				if err != mdbx.ErrSuccess {
+					return err
+				}
+				err = nil
+				defer begin.Close()
+
+				end, err = tx.OpenCursor(docsDBI)
+				if err != mdbx.ErrSuccess {
+					return err
+				}
+				err = nil
+				defer end.Close()
+
+				// collection counts
+				for _, cs := range list {
+					_, _, _, err := cs.load(begin, end)
+					if err != nil {
+						continue
+					}
+				}
+
+				return nil
+			}); err != nil && err != mdbx.ErrSuccess {
+				goto DONE
+			}
+			err = nil
 		}
+
 		progress.IndexDrops.Total = int64(len(indexDrops))
 		for _, drop := range indexDrops {
-			progress.IndexDrops.Total += collectionCounts[drop.meta.Owner]
-			progress.Total += collectionCounts[drop.meta.Owner]
+			progress.IndexDrops.Total += collectionsToLoad[drop.meta.Owner].estimated
+			progress.Total += collectionsToLoad[drop.meta.Owner].estimated
 		}
 		progress.IndexCreates.Total = int64(len(indexCreates))
 		for _, create := range indexCreates {
-			progress.IndexCreates.Total += collectionCounts[create.meta.Owner]
-			progress.Total += collectionCounts[create.meta.Owner]
+			progress.IndexCreates.Total += collectionsToLoad[create.meta.Owner].estimated
+			progress.Total += collectionsToLoad[create.meta.Owner].estimated
 		}
 		progress.CollectionDrops.Total = int64(len(collectionDrops))
 		for _, drop := range collectionDrops {
-			progress.CollectionDrops.Total += collectionCounts[drop.meta.Id]
-			progress.Total += collectionCounts[drop.meta.Id]
+			progress.CollectionDrops.Total += collectionsToLoad[drop.meta.Id].estimated
+			progress.Total += collectionsToLoad[drop.meta.Id].estimated
 		}
-		now := time.Now()
+		now = time.Now()
 		progress.Prepared = now.Sub(progress.Started)
 		progress.State = EvolutionStatePrepared
 		chProgress <- progress
@@ -558,7 +589,7 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 					data         = mdbx.Val{}
 					count        = int64(0)
 					total        = int64(0)
-					estimated    = collectionCounts[collectionID]
+					estimated    = collectionsToLoad[collectionID].estimated
 				)
 				for err == nil {
 					// Cancelled?
@@ -653,7 +684,7 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 					docData      = mdbx.Val{}
 					count        = int64(0)
 					total        = int64(0)
-					estimated    = collectionCounts[collectionID]
+					estimated    = collectionsToLoad[collectionID].estimated
 				)
 				for err == nil {
 					// Cancelled?
@@ -699,7 +730,7 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 							}
 
 							// Insert index
-							if e = index.doInsert(&nstore.tx); e != nil {
+							if e = index.doInsert(nstore.tx); e != nil {
 								return e
 							}
 
@@ -762,7 +793,7 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 					id           DocID
 					count        = int64(0)
 					total        = int64(0)
-					estimated    = collectionCounts[collectionID]
+					estimated    = collectionsToLoad[collectionID].estimated
 				)
 				for err == nil {
 					// Cancelled?
@@ -837,16 +868,15 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 		// Save schema.
 		if err = store.Update(func(tx *mdbx.Tx) error {
 			var (
-				k    = NewDocID(schemaCollectionID, uint64(ev.to.Id))
-				key  = k.Key()
-				data = mdbx.Val{}
+				bytes, err = json.Marshal(ev.to)
+				k          = NewDocID(schemaCollectionID, uint64(ev.to.Id))
+				key        = k.Key()
+				data       = mdbx.Bytes(&bytes)
 			)
 
-			bytes, err := json.Marshal(ev.to)
 			if err != nil {
 				return err
 			}
-			data = mdbx.Bytes(&bytes)
 
 			if e := tx.Put(docsDBI, &key, &data, 0); e != mdbx.ErrSuccess {
 				return e

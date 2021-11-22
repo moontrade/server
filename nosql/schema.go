@@ -3,6 +3,7 @@ package nosql
 import (
 	"errors"
 	"fmt"
+	"github.com/moontrade/mdbx-go"
 	"reflect"
 	"sort"
 	"strings"
@@ -48,6 +49,7 @@ type Schema struct {
 	Collections   []Collection
 	collectionMap map[string]Collection
 	store         *Store
+	loaded        bool
 	mu            sync.Mutex
 }
 
@@ -73,6 +75,34 @@ func (s *Schema) buildMeta() *SchemaMeta {
 	}
 	s.Meta = m
 	return &m
+}
+
+func (s *Schema) Update(fn func(tx *Tx) error) error {
+	return s.store.store.Update(func(tx *mdbx.Tx) error {
+		txn := s.store.tx
+		txn.Reset(tx)
+		txn.Tx = tx
+		if !s.loaded {
+			var err error
+			sort.Sort(collectionsByIDSlice(s.Collections))
+			for _, collection := range s.Collections {
+				if err = collection.collectionStore.ensureLoaded(txn); err != nil {
+					return err
+				}
+			}
+			s.loaded = true
+		}
+		return fn(txn)
+	})
+}
+
+func (s *Schema) View(fn func(tx *Tx) error) error {
+	return s.store.store.View(func(tx *mdbx.Tx) error {
+		var txn Tx
+		txn.store = s.store
+		txn.Reset(tx)
+		return fn(&txn)
+	})
 }
 
 type SchemaMeta struct {
@@ -164,6 +194,14 @@ LOOP:
 			return nil, fmt.Errorf("duplicate collections named %s", col.Name)
 		}
 		schema.collectionMap[col.Name] = col
+
+		// Find Collection field
+		collectionField, ok := fieldType.Type.FieldByName("Collection")
+		if ok {
+			fieldValue = fieldValue.FieldByName("Collection")
+			_ = collectionField
+		}
+
 		*(*Collection)(unsafe.Pointer(fieldValue.UnsafeAddr())) = col
 		schema.Collections = append(schema.Collections, col)
 	}
@@ -194,8 +232,13 @@ collectionLoop:
 	for i := 0; i < t.NumField(); i++ {
 		fieldValueType := valueType.Field(i)
 		fieldType := t.Field(i)
-		switch fieldType.Name {
 
+		var inter Marshaller
+		if fieldType.Name == "Marshaller" && fieldType.Type.Implements(reflect.TypeOf(inter)) {
+			col.Marshaller = fieldValueType.Interface().(Marshaller)
+		}
+
+		switch fieldType.Name {
 		case "Collection":
 			foundCollection = true
 
@@ -289,6 +332,12 @@ indexLoop:
 		}
 	}
 
+	if col.Type != nil && col.Marshaller == nil {
+		col.Marshaller = MarshallerOfType(col.Type)
+	}
+
+	col.marshaller = col.Marshaller
+
 	return col, nil
 }
 
@@ -316,10 +365,10 @@ func parseIndex(
 		*(*Int64Unique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
-	case ft.AssignableTo(int64ArrayTypeOf):
-		index := NewInt64Array(name, selector, version, val.Interface().(Int64Array).ValueOf)
-		*(*Int64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
-		return index, nil
+	//case ft.AssignableTo(int64ArrayTypeOf):
+	//	index := NewInt64Array(name, selector, version, val.Interface().(Int64Array).ValueOf)
+	//	*(*Int64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
+	//	return index, nil
 
 	case ft.AssignableTo(float64TypeOf):
 		index := NewFloat64(name, selector, version, val.Interface().(Float64).ValueOf)
@@ -331,10 +380,10 @@ func parseIndex(
 		*(*Float64Unique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
-	case ft.AssignableTo(float64ArrayTypeOf):
-		index := NewFloat64Array(name, selector, version, val.Interface().(Float64Array).ValueOf)
-		*(*Float64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
-		return index, nil
+	//case ft.AssignableTo(float64ArrayTypeOf):
+	//	index := NewFloat64Array(name, selector, version, val.Interface().(Float64Array).ValueOf)
+	//	*(*Float64Array)(unsafe.Pointer(val.UnsafeAddr())) = *index
+	//	return index, nil
 
 	case ft.AssignableTo(stringTypeOf):
 		index := NewString(name, selector, version, val.Interface().(String).ValueOf)
@@ -346,10 +395,10 @@ func parseIndex(
 		*(*StringUnique)(unsafe.Pointer(val.UnsafeAddr())) = *index
 		return index, nil
 
-	case ft.AssignableTo(stringArrayTypeOf):
-		index := NewStringArray(name, selector, version, val.Interface().(StringArray).ValueOf)
-		*(*StringArray)(unsafe.Pointer(val.UnsafeAddr())) = *index
-		return index, nil
+		//case ft.AssignableTo(stringArrayTypeOf):
+		//	index := NewStringArray(name, selector, version, val.Interface().(StringArray).ValueOf)
+		//	*(*StringArray)(unsafe.Pointer(val.UnsafeAddr())) = *index
+		//	return index, nil
 	}
 	return nil, errNotIndexType
 }

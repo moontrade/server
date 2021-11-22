@@ -189,7 +189,7 @@ func openSchemaStore(s *Store) (*schemasStore, error) {
 		{
 			var (
 				k    = NewDocID(schemaCollectionID, 0)
-				key  = docIDVal(&k)
+				key  = k.Key()
 				data = mdbx.Val{}
 			)
 

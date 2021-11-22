@@ -232,6 +232,26 @@ func (x collectionMetasSlice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
 // Sort is a convenience method: x.Sort() calls Sort(x).
 func (x collectionMetasSlice) Sort() { sort.Sort(x) }
 
+// collectionsByIDSlice attaches the methods of Interface to []CollectionMeta, sorting in increasing order.
+type collectionsByIDSlice []Collection
+
+func (x collectionsByIDSlice) Len() int           { return len(x) }
+func (x collectionsByIDSlice) Less(i, j int) bool { return x[i].Id < x[j].Id }
+func (x collectionsByIDSlice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
+
+// Sort is a convenience method: x.Sort() calls Sort(x).
+func (x collectionsByIDSlice) Sort() { sort.Sort(x) }
+
+// collectionStoresSlice attaches the methods of Interface to []CollectionMeta, sorting in increasing order.
+type collectionStoresSlice []*collectionStore
+
+func (x collectionStoresSlice) Len() int           { return len(x) }
+func (x collectionStoresSlice) Less(i, j int) bool { return x[i].Id < x[j].Id }
+func (x collectionStoresSlice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
+
+// Sort is a convenience method: x.Sort() calls Sort(x).
+func (x collectionStoresSlice) Sort() { sort.Sort(x) }
+
 // indexMetasSlice attaches the methods of Interface to []IndexMeta, sorting in increasing order.
 type indexMetasSlice []IndexMeta
 

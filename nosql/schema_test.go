@@ -2,11 +2,26 @@ package nosql_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/moontrade/mdbx-go"
 	"github.com/moontrade/server/nosql"
+	"math"
 	"testing"
 )
+
+func TestDocID(t *testing.T) {
+	var (
+		id1 = nosql.NewDocID(100, 2)
+		id2 = nosql.NewDocID(100, 1)
+		id3 = nosql.NewDocID(1, 1)
+	)
+
+	fmt.Println(id1)
+	fmt.Println(id2)
+	fmt.Println(id3)
+
+	fmt.Println(uint64(math.MaxUint64) / uint64(math.MaxUint16))
+}
 
 func TestSchema(t *testing.T) {
 	store, err := nosql.Open(&nosql.Config{
@@ -30,7 +45,9 @@ func TestSchema(t *testing.T) {
 	if progress, err = store.Hydrate(context.Background(), schema); err != nil {
 		t.Fatal(err)
 	}
-	wait(progress)
+	if err = wait(progress); err != nil {
+		t.Fatal(err)
+	}
 
 	if schema, err = nosql.ParseSchemaWithUID("@", mySchema2); err != nil {
 		t.Fatal(err)
@@ -38,24 +55,78 @@ func TestSchema(t *testing.T) {
 	if progress, err = store.Hydrate(context.Background(), schema); err != nil {
 		t.Fatal(err)
 	}
-	wait(progress)
+	if err = wait(progress); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func wait(progress <-chan nosql.EvolutionProgress) {
+func TestCRUD(t *testing.T) {
+	store, err := nosql.Open(&nosql.Config{
+		Path:  "./testdata",
+		Flags: nosql.DefaultDurable,
+		Mode:  0755,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		mySchema = &MySchema{}
+		schema   *nosql.Schema
+		progress <-chan nosql.EvolutionProgress
+	)
+	if schema, err = nosql.ParseSchemaWithUID("@", mySchema); err != nil {
+		t.Fatal(err)
+	}
+	if progress, err = store.Hydrate(context.Background(), schema); err != nil {
+		t.Fatal(err)
+	}
+	if err = wait(progress); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = mySchema.Update(func(tx *nosql.Tx) error {
+		if err := mySchema.Orders.Insert(tx, &Order{
+			Num:   100,
+			Key:   "ORD1",
+			Price: 1.7843,
+		}); err != nil {
+			return err
+		}
+		if err := mySchema.Orders.Insert(tx, &Order{
+			Num:   101,
+			Key:   "ORD2",
+			Price: 1.8912,
+		}); err != nil {
+			return err
+		}
+		if err := mySchema.Orders.Insert(tx, &Order{
+			Num:   102,
+			Key:   "ORD3",
+			Price: 1.9758,
+		}); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func wait(progress <-chan nosql.EvolutionProgress) error {
 	if progress == nil {
-		fmt.Println("schema does not require an evolution")
-		return
+		return errors.New("schema does not require an evolution")
 	}
 LOOP:
 	for {
 		select {
 		case p, ok := <-progress:
 			if !ok {
-				break LOOP
+				return p.Err
 			}
 			switch p.State {
 			case nosql.EvolutionStateError:
-				break LOOP
+				return p.Err
 			case nosql.EvolutionStateCompleted:
 				break LOOP
 			case nosql.EvolutionStatePreparing:
@@ -74,19 +145,13 @@ LOOP:
 			}
 		}
 	}
+	return nil
 }
 
 type MySchema struct {
 	*nosql.Schema
 
-	Orders struct {
-		_ Order
-		nosql.Collection
-		Num       nosql.Int64Unique  `@:"num"`
-		Key       nosql.StringUnique `@:"key"`
-		Price     nosql.Float64      `@:"price"`
-		FirstName nosql.String       `@:"name.first"`
-	}
+	Orders Orders
 
 	Items struct {
 		nosql.Collection
@@ -128,10 +193,10 @@ type Schema2 struct {
 }
 
 type Order struct {
-	ID    uint64  `json:"ID"`
-	Num   uint64  `json:"num"`
-	Key   string  `json:"key"`
-	Price float64 `json:"price"`
+	ID    nosql.DocID `json:"ID"`
+	Num   uint64      `json:"num"`
+	Key   string      `json:"key"`
+	Price float64     `json:"price"`
 }
 
 type Orders struct {
@@ -143,6 +208,7 @@ type Orders struct {
 	FirstName nosql.String       `@:"name.first"`
 }
 
-func (s *Orders) UpdateWith(tx *mdbx.Tx, id nosql.DocID, data *Order) error {
-	return nil
+func (orders *Orders) Insert(tx *nosql.Tx, order *Order) error {
+	order.ID = orders.NextID()
+	return orders.Collection.Insert(tx, order.ID, order, nil)
 }

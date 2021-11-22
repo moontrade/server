@@ -1,16 +1,26 @@
 package nosql
 
 import (
+	"errors"
 	"github.com/moontrade/mdbx-go"
+	"math"
 	"reflect"
 	"sync/atomic"
 	"unsafe"
+)
+
+var (
+	ErrDocumentNil = errors.New("document nil")
 )
 
 // CollectionID is an UID for a single collection used in unique DocID
 // instead of variable length string names. This provides deterministic
 // key operations regardless of length of collection name.
 type CollectionID uint16
+
+const (
+	MaxDocSequence = uint64(math.MaxUint64) / uint64(math.MaxUint16)
+)
 
 // DocID
 type DocID uint64
@@ -19,19 +29,19 @@ type DocID uint64
 // instead of variable length string names. This provides deterministic
 // key operations regardless of length of collection name.
 func (r DocID) CollectionID() CollectionID {
-	return *(*CollectionID)(unsafe.Pointer(&r))
+	return CollectionID(r / DocID(MaxDocSequence))
 }
 
 // Sequence 48bit unsigned integer that represents the unique sequence within the collection.
 func (r DocID) Sequence() uint64 {
-	result := uint64(r)
-	*(*CollectionID)(unsafe.Pointer(&result)) = 0
-	return result
+	return uint64(r) - uint64(r.CollectionID())*MaxDocSequence
 }
 
-func NewDocID(collection CollectionID, id uint64) DocID {
-	*(*uint16)(unsafe.Pointer(&id)) = uint16(collection)
-	return DocID(id)
+func NewDocID(collection CollectionID, sequence uint64) DocID {
+	if sequence > MaxDocSequence {
+		sequence = MaxDocSequence
+	}
+	return DocID((uint64(collection) * MaxDocSequence) + sequence)
 }
 
 func (id *DocID) Key() mdbx.Val {
@@ -39,6 +49,12 @@ func (id *DocID) Key() mdbx.Val {
 		Base: (*byte)(unsafe.Pointer(id)),
 		Len:  8,
 	}
+}
+
+type Document struct {
+	ID        DocID       `json:"i"`
+	Timestamp uint64      `json:"t"`
+	Data      interface{} `json:"d"`
 }
 
 type CollectionKind int
@@ -62,11 +78,12 @@ const (
 	//IndexTypeSpatial IndexKind = 11
 )
 
-type GetValue func(doc string, into []byte) (result []byte, err error)
+//type GetValue func(doc string, into []byte) (result []byte, err error)
 
 type Collection struct {
 	*collectionStore
-	Name string
+	Name       string
+	Marshaller Marshaller
 }
 
 type CollectionMeta struct {
@@ -95,82 +112,17 @@ func (cd *collectionDescriptor) Equals(other *collectionDescriptor) bool {
 		cd.Version == other.Version
 }
 
-func (s *Store) EstimateCollectionCount(collectionID CollectionID) (count int64, err error) {
-	err = s.store.View(func(tx *mdbx.Tx) error {
-		var (
-			k     = NewDocID(collectionID, 0)
-			key   = k.Key()
-			data  = mdbx.Val{}
-			first *mdbx.Cursor
-			last  *mdbx.Cursor
-		)
-
-		first, err = tx.OpenCursor(s.documentsDBI)
-		if err != mdbx.ErrSuccess {
-			return err
-		}
-		err = nil
-		defer first.Close()
-
-		last, err = tx.OpenCursor(s.documentsDBI)
-		if err != mdbx.ErrSuccess {
-			return err
-		}
-		err = nil
-		defer last.Close()
-
-		if err = first.Get(&key, &data, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
-			if err == mdbx.ErrNotFound {
-				err = nil
-				return nil
-			}
-			return err
-		}
-		id := DocID(key.U64())
-		if id.CollectionID() != collectionID {
-			return nil
-		}
-		if err = last.Get(&key, &data, mdbx.CursorPrevNoDup); err != mdbx.ErrSuccess {
-			if err == mdbx.ErrNotFound {
-				err = nil
-				return nil
-			}
-			return err
-		}
-		lastID := DocID(key.U64())
-		if lastID.CollectionID() != collectionID {
-			count = 1
-			return nil
-		}
-
-		count, err = mdbx.EstimateDistance(first, last)
-		if err == mdbx.ErrNotFound {
-			count = 1
-			return nil
-		}
-		if err == mdbx.ErrSuccess {
-			err = nil
-		}
-		return err
-	})
-	if err == mdbx.ErrSuccess {
-		err = nil
-	}
-	return
-}
-
 type collectionStore struct {
 	CollectionMeta
 	Type       reflect.Type
+	marshaller Marshaller
 	store      *Store
 	indexes    []Index
 	indexMap   map[string]Index
-	id         CollectionID
 	minID      DocID
-	maxID      DocID
 	sequence   uint64
-	bytes      uint64
-	indexBytes uint64
+	estimated  int64
+	err        error
 	loaded     bool
 }
 
@@ -178,64 +130,183 @@ type Cursor struct {
 	c *indexStore
 }
 
-func docIDVal(key *DocID) mdbx.Val {
-	return mdbx.Val{
-		Base: (*byte)(unsafe.Pointer(key)),
-		Len:  8,
-	}
+func (cs *collectionStore) DocID(sequence uint64) DocID {
+	return NewDocID(cs.Id, sequence)
 }
 
-func (s *collectionStore) RecordID(sequence uint64) DocID {
-	return NewDocID(s.id, sequence)
+func (cs *collectionStore) NextID() DocID {
+	return NewDocID(cs.Id, atomic.AddUint64(&cs.sequence, 1))
 }
 
-func (s *collectionStore) NextID() DocID {
-	return NewDocID(s.id, atomic.AddUint64(&s.sequence, 1))
+func (cs *collectionStore) MinID() DocID {
+	return cs.minID
 }
 
-func (s *collectionStore) Insert(
-	tx *Tx,
-	data []byte,
-	unmarshalled interface{},
-) (DocID, error) {
+func (cs *collectionStore) MaxID() DocID {
+	return NewDocID(cs.Id, cs.sequence)
+}
+
+func (cs *collectionStore) load(begin, end *mdbx.Cursor) (count int64, min, max DocID, err error) {
 	var (
-		id     = NewDocID(s.id, atomic.AddUint64(&s.sequence, 1))
-		key    = docIDVal(&id)
-		val    = mdbx.Bytes(&data)
-		d      = *(*string)(unsafe.Pointer(&data))
-		cursor = tx.Docs()
-		err    error
+		collectionID = cs.Id
+		k            = NewDocID(collectionID, 0)
+		key          = k.Key()
+		data         = mdbx.Val{}
+		id           DocID
+		lastID       DocID
+		colID        = k.CollectionID()
+		seq          = k.Sequence()
 	)
+
+	if err = begin.Get(&key, &data, mdbx.CursorSetRange); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrNotFound {
+			err = nil
+			goto DONE
+		} else {
+			cs.err = err
+			return
+		}
+	}
+	id = DocID(key.U64())
+	colID = id.CollectionID()
+	seq = id.Sequence()
+	if id.CollectionID() != collectionID {
+		goto DONE
+	}
+
+	k = NewDocID(collectionID, MaxDocSequence)
+	key = k.Key()
+	colID = k.CollectionID()
+	seq = k.Sequence()
+
+	_ = colID
+	_ = seq
+	if err = end.Get(&key, &data, mdbx.CursorPrevNoDup); err != mdbx.ErrSuccess {
+		if err == mdbx.ErrNotFound {
+			err = nil
+			goto DONE
+		} else {
+			cs.err = err
+			return
+		}
+	}
+	lastID = DocID(key.U64())
+	colID = lastID.CollectionID()
+	seq = lastID.Sequence()
+	if lastID.CollectionID() != collectionID {
+		count = 1
+		lastID = id
+	}
+
+	min = id
+	max = lastID
+
+	count, err = mdbx.EstimateDistance(begin, end)
+	if err == mdbx.ErrNotFound {
+		count = 1
+		err = nil
+	}
+	if err == mdbx.ErrSuccess {
+		err = nil
+	}
+	count++
+
+DONE:
+	if err == mdbx.ErrSuccess {
+		err = nil
+	}
+	if err != nil {
+		cs.err = err
+		return
+	}
+	cs.minID = min
+	atomic.StoreUint64(&cs.sequence, max.Sequence())
+	cs.estimated = count
+	cs.loaded = true
+	cs.err = nil
+	return
+}
+
+func (cs *collectionStore) ensureLoaded(tx *Tx) error {
+	if cs.loaded {
+		return nil
+	}
+	var (
+		err error
+		end *mdbx.Cursor
+	)
+	end, err = tx.Tx.OpenCursor(cs.store.documentsDBI)
+	if err != mdbx.ErrSuccess {
+		return err
+	}
+	err = nil
+	_, _, _, err = cs.load(tx.Docs(), end)
+	return err
+}
+
+func (cs *collectionStore) Insert(
+	tx *Tx,
+	id DocID,
+	unmarshalled interface{},
+	marshalled []byte,
+) error {
+	var err error
+	if err = cs.ensureLoaded(tx); err != nil {
+		return err
+	}
+
+	if len(marshalled) == 0 {
+		if marshalled, err = cs.marshaller.Marshal(unmarshalled, tx.buffer); err != nil {
+			return err
+		}
+	}
+
+	var (
+		key    = id.Key()
+		val    = mdbx.Bytes(&marshalled)
+		d      = *(*string)(unsafe.Pointer(&marshalled))
+		cursor = tx.Docs()
+	)
+
 	if err = cursor.Put(&key, &val, mdbx.PutNoOverwrite); err != mdbx.ErrSuccess {
-		return 0, err
+		return err
 	}
 	// Insert indexes
-	if len(s.indexes) > 0 {
+	if len(cs.indexes) > 0 {
 		tx.Index()
 		tx.doc = d
 		tx.docTyped = unmarshalled
-		for _, index := range s.indexes {
+		for _, index := range cs.indexes {
 			if err = index.doInsert(tx); err != nil {
-				return 0, err
+				return err
 			}
 		}
 	}
-	return id, nil
+	return nil
 }
 
-func (s *collectionStore) Update(
+func (cs *collectionStore) Update(
 	tx *Tx,
 	id DocID,
-	data []byte,
 	unmarshalled interface{},
+	marshalled []byte,
 	prev func(val mdbx.Val),
 ) error {
+	var err error
+	if err = cs.ensureLoaded(tx); err != nil {
+		return err
+	}
+	if len(marshalled) == 0 {
+		if marshalled, err = cs.marshaller.Marshal(unmarshalled, tx.buffer); err != nil {
+			return err
+		}
+	}
+
 	var (
-		key    = docIDVal(&id)
-		val    = mdbx.Bytes(&data)
-		d      = *(*string)(unsafe.Pointer(&data))
+		key    = id.Key()
+		val    = mdbx.Bytes(&marshalled)
+		d      = *(*string)(unsafe.Pointer(&marshalled))
 		cursor = tx.Docs()
-		err    error
 	)
 
 	if err = cursor.Get(&key, &val, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
@@ -250,13 +321,13 @@ func (s *collectionStore) Update(
 		return err
 	}
 	// Update indexes
-	if len(s.indexes) > 0 {
+	if len(cs.indexes) > 0 {
 		tx.Index()
 		tx.doc = d
 		tx.docTyped = unmarshalled
 		tx.prev = val.UnsafeString()
 		tx.prevTyped = nil
-		for _, index := range s.indexes {
+		for _, index := range cs.indexes {
 			if err = index.doUpdate(tx); err != nil {
 				return err
 			}
@@ -269,17 +340,20 @@ func (s *collectionStore) Update(
 	return nil
 }
 
-func (s *collectionStore) Delete(
+func (cs *collectionStore) Delete(
 	tx *Tx,
 	id DocID,
 	unmarshalled interface{},
 	prev func(val mdbx.Val),
 ) (bool, error) {
+	var err error
+	if err = cs.ensureLoaded(tx); err != nil {
+		return false, err
+	}
 	var (
-		key    = docIDVal(&id)
+		key    = id.Key()
 		val    = mdbx.Val{}
 		cursor = tx.Docs()
-		err    error
 	)
 
 	if err = cursor.Get(&key, &val, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
@@ -298,12 +372,12 @@ func (s *collectionStore) Delete(
 	}
 
 	// Delete indexes
-	if len(s.indexes) > 0 {
+	if len(cs.indexes) > 0 {
 		tx.Index()
 		data := val.UnsafeBytes()
 		tx.doc = *(*string)(unsafe.Pointer(&data))
 		tx.docTyped = unmarshalled
-		for _, index := range s.indexes {
+		for _, index := range cs.indexes {
 			if err = index.doDelete(tx); err != nil {
 				return false, err
 			}

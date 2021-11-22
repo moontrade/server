@@ -61,6 +61,7 @@ const (
 	kvDBI        = "kv"
 	documentsDBI = "docs"
 	indexDBI     = "index"
+	streamDBI    = "stream"
 )
 
 var (
@@ -77,7 +78,7 @@ type Store struct {
 	indexDBI     mdbx.DBI    // indexes database
 	streamDBI    mdbx.DBI    // streams database
 	schemas      *schemasStore
-	tx           Tx
+	tx           *Tx
 	mu           sync.Mutex
 }
 
@@ -111,6 +112,7 @@ func Open(config *Config) (*Store, error) {
 		}
 		err error
 	)
+	s.tx = NewTx(s)
 
 	if s.store, err = mdbx.Open(config.Path, config.Flags, config.Mode,
 		func(env *mdbx.Env, create bool) error {
@@ -130,10 +132,14 @@ func Open(config *Config) (*Store, error) {
 				if s.kvDBI, e = tx.OpenDBI(kvDBI, mdbx.DBCreate); e != mdbx.ErrSuccess {
 					return e
 				}
+				//if s.documentsDBI, e = tx.OpenDBI(documentsDBI, mdbx.DBCreate|mdbx.DBIntegerKey); e != mdbx.ErrSuccess {
 				if s.documentsDBI, e = tx.OpenDBIEx(documentsDBI, mdbx.DBCreate|mdbx.DBIntegerKey, mdbx.CmpU64, nil); e != mdbx.ErrSuccess {
 					return e
 				}
-				if s.indexDBI, e = tx.OpenDBIEx(indexDBI, mdbx.DBCreate, mdbx.CmpU32PrefixLexical, nil); e != mdbx.ErrSuccess {
+				if s.indexDBI, e = tx.OpenDBIEx(indexDBI, mdbx.DBCreate, mdbx.CmpU32PrefixU64DupLexical, nil); e != mdbx.ErrSuccess {
+					return e
+				}
+				if s.streamDBI, e = tx.OpenDBIEx(streamDBI, mdbx.DBCreate|mdbx.DBIntegerKey, mdbx.CmpU64, nil); e != mdbx.ErrSuccess {
 					return e
 				}
 				return nil
