@@ -19,7 +19,8 @@ var (
 type CollectionID uint16
 
 const (
-	MaxDocSequence = uint64(math.MaxUint64) / uint64(math.MaxUint16)
+	maxDocSequence    = uint64(math.MaxUint64) / uint64(math.MaxUint16)
+	MaxCollectionSize = maxDocSequence - 1
 )
 
 // DocID
@@ -29,19 +30,19 @@ type DocID uint64
 // instead of variable length string names. This provides deterministic
 // key operations regardless of length of collection name.
 func (r DocID) CollectionID() CollectionID {
-	return CollectionID(r / DocID(MaxDocSequence))
+	return CollectionID(r / DocID(maxDocSequence))
 }
 
 // Sequence 48bit unsigned integer that represents the unique sequence within the collection.
 func (r DocID) Sequence() uint64 {
-	return uint64(r) - uint64(r.CollectionID())*MaxDocSequence
+	return uint64(r) - uint64(r.CollectionID())*maxDocSequence
 }
 
 func NewDocID(collection CollectionID, sequence uint64) DocID {
-	if sequence > MaxDocSequence {
-		sequence = MaxDocSequence
+	if sequence > maxDocSequence {
+		sequence = maxDocSequence
 	}
-	return DocID((uint64(collection) * MaxDocSequence) + sequence)
+	return DocID((uint64(collection) * maxDocSequence) + sequence)
 }
 
 func (id *DocID) Key() mdbx.Val {
@@ -146,6 +147,7 @@ func (cs *collectionStore) MaxID() DocID {
 	return NewDocID(cs.Id, cs.sequence)
 }
 
+// load the collection to allow for new inserts.
 func (cs *collectionStore) load(begin, end *mdbx.Cursor) (count int64, min, max DocID, err error) {
 	var (
 		collectionID = cs.Id
@@ -154,8 +156,6 @@ func (cs *collectionStore) load(begin, end *mdbx.Cursor) (count int64, min, max 
 		data         = mdbx.Val{}
 		id           DocID
 		lastID       DocID
-		colID        = k.CollectionID()
-		seq          = k.Sequence()
 	)
 
 	if err = begin.Get(&key, &data, mdbx.CursorSetRange); err != mdbx.ErrSuccess {
@@ -168,19 +168,13 @@ func (cs *collectionStore) load(begin, end *mdbx.Cursor) (count int64, min, max 
 		}
 	}
 	id = DocID(key.U64())
-	colID = id.CollectionID()
-	seq = id.Sequence()
 	if id.CollectionID() != collectionID {
 		goto DONE
 	}
 
-	k = NewDocID(collectionID, MaxDocSequence)
+	// Find the last record
+	k = NewDocID(collectionID, maxDocSequence)
 	key = k.Key()
-	colID = k.CollectionID()
-	seq = k.Sequence()
-
-	_ = colID
-	_ = seq
 	if err = end.Get(&key, &data, mdbx.CursorPrevNoDup); err != mdbx.ErrSuccess {
 		if err == mdbx.ErrNotFound {
 			err = nil
@@ -191,8 +185,7 @@ func (cs *collectionStore) load(begin, end *mdbx.Cursor) (count int64, min, max 
 		}
 	}
 	lastID = DocID(key.U64())
-	colID = lastID.CollectionID()
-	seq = lastID.Sequence()
+	// This shouldn't happen
 	if lastID.CollectionID() != collectionID {
 		count = 1
 		lastID = id
@@ -201,6 +194,7 @@ func (cs *collectionStore) load(begin, end *mdbx.Cursor) (count int64, min, max 
 	min = id
 	max = lastID
 
+	// Estimate count
 	count, err = mdbx.EstimateDistance(begin, end)
 	if err == mdbx.ErrNotFound {
 		count = 1
@@ -209,6 +203,7 @@ func (cs *collectionStore) load(begin, end *mdbx.Cursor) (count int64, min, max 
 	if err == mdbx.ErrSuccess {
 		err = nil
 	}
+	// Increment by one to account for first record
 	count++
 
 DONE:
@@ -235,11 +230,14 @@ func (cs *collectionStore) ensureLoaded(tx *Tx) error {
 		err error
 		end *mdbx.Cursor
 	)
+	// Create a new temporary cursor for End
 	end, err = tx.Tx.OpenCursor(cs.store.documentsDBI)
 	if err != mdbx.ErrSuccess {
 		return err
 	}
+	defer end.Close()
 	err = nil
+	// Reuse Docs Cursor for begin
 	_, _, _, err = cs.load(tx.Docs(), end)
 	return err
 }
@@ -264,7 +262,6 @@ func (cs *collectionStore) Insert(
 	var (
 		key    = id.Key()
 		val    = mdbx.Bytes(&marshalled)
-		d      = *(*string)(unsafe.Pointer(&marshalled))
 		cursor = tx.Docs()
 	)
 
@@ -274,8 +271,16 @@ func (cs *collectionStore) Insert(
 	// Insert indexes
 	if len(cs.indexes) > 0 {
 		tx.Index()
-		tx.doc = d
+		tx.docID = id
+		tx.doc = *(*string)(unsafe.Pointer(&marshalled))
 		tx.docTyped = unmarshalled
+		defer func() {
+			tx.doc = ""
+			tx.docID = 0
+			tx.docTyped = nil
+			tx.prev = ""
+			tx.prevTyped = nil
+		}()
 		for _, index := range cs.indexes {
 			if err = index.doInsert(tx); err != nil {
 				return err
@@ -301,15 +306,13 @@ func (cs *collectionStore) Update(
 			return err
 		}
 	}
-
 	var (
 		key    = id.Key()
 		val    = mdbx.Bytes(&marshalled)
-		d      = *(*string)(unsafe.Pointer(&marshalled))
 		cursor = tx.Docs()
 	)
 
-	if err = cursor.Get(&key, &val, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+	if err = cursor.Get(&key, &val, mdbx.CursorSetRange); err != mdbx.ErrSuccess {
 		return err
 	}
 	err = nil
@@ -323,10 +326,18 @@ func (cs *collectionStore) Update(
 	// Update indexes
 	if len(cs.indexes) > 0 {
 		tx.Index()
-		tx.doc = d
+		tx.docID = id
+		tx.doc = *(*string)(unsafe.Pointer(&marshalled))
 		tx.docTyped = unmarshalled
 		tx.prev = val.UnsafeString()
 		tx.prevTyped = nil
+		defer func() {
+			tx.doc = ""
+			tx.docID = 0
+			tx.docTyped = nil
+			tx.prev = ""
+			tx.prevTyped = nil
+		}()
 		for _, index := range cs.indexes {
 			if err = index.doUpdate(tx); err != nil {
 				return err
@@ -346,6 +357,7 @@ func (cs *collectionStore) Delete(
 	unmarshalled interface{},
 	prev func(val mdbx.Val),
 ) (bool, error) {
+	tx.docID = id
 	var err error
 	if err = cs.ensureLoaded(tx); err != nil {
 		return false, err
@@ -356,7 +368,7 @@ func (cs *collectionStore) Delete(
 		cursor = tx.Docs()
 	)
 
-	if err = cursor.Get(&key, &val, mdbx.CursorNextNoDup); err != mdbx.ErrSuccess {
+	if err = cursor.Get(&key, &val, mdbx.CursorSetRange); err != mdbx.ErrSuccess {
 		return false, err
 	}
 	err = nil
@@ -375,8 +387,16 @@ func (cs *collectionStore) Delete(
 	if len(cs.indexes) > 0 {
 		tx.Index()
 		data := val.UnsafeBytes()
+		tx.docID = id
 		tx.doc = *(*string)(unsafe.Pointer(&data))
 		tx.docTyped = unmarshalled
+		defer func() {
+			tx.doc = ""
+			tx.docID = 0
+			tx.docTyped = nil
+			tx.prev = ""
+			tx.prevTyped = nil
+		}()
 		for _, index := range cs.indexes {
 			if err = index.doDelete(tx); err != nil {
 				return false, err

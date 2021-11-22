@@ -34,25 +34,18 @@ func TestSchema(t *testing.T) {
 	}
 
 	var (
-		mySchema  = &MySchema{}
-		mySchema2 = &Schema2{}
-		schema    *nosql.Schema
-		progress  <-chan nosql.EvolutionProgress
+		schema   = &Schema{UID: "@"}
+		schema2  = &Schema2{UID: "@"}
+		progress <-chan nosql.EvolutionProgress
 	)
-	if schema, err = nosql.ParseSchemaWithUID("@", mySchema); err != nil {
-		t.Fatal(err)
-	}
-	if progress, err = store.Hydrate(context.Background(), schema); err != nil {
+
+	if progress, err = store.HydrateTyped(context.Background(), schema); err != nil {
 		t.Fatal(err)
 	}
 	if err = wait(progress); err != nil {
 		t.Fatal(err)
 	}
-
-	if schema, err = nosql.ParseSchemaWithUID("@", mySchema2); err != nil {
-		t.Fatal(err)
-	}
-	if progress, err = store.Hydrate(context.Background(), schema); err != nil {
+	if progress, err = store.HydrateTyped(context.Background(), schema2); err != nil {
 		t.Fatal(err)
 	}
 	if err = wait(progress); err != nil {
@@ -69,38 +62,33 @@ func TestCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	var (
-		mySchema = &MySchema{}
-		schema   *nosql.Schema
+		schema   = &Schema{}
 		progress <-chan nosql.EvolutionProgress
 	)
-	if schema, err = nosql.ParseSchemaWithUID("@", mySchema); err != nil {
-		t.Fatal(err)
-	}
-	if progress, err = store.Hydrate(context.Background(), schema); err != nil {
+	if progress, err = store.HydrateTyped(context.Background(), schema); err != nil {
 		t.Fatal(err)
 	}
 	if err = wait(progress); err != nil {
 		t.Fatal(err)
 	}
 
-	if err = mySchema.Update(func(tx *nosql.Tx) error {
-		if err := mySchema.Orders.Insert(tx, &Order{
+	if err = schema.Update(func(tx *nosql.Tx) error {
+		if err := schema.Orders.Insert(tx, &Order{
 			Num:   100,
 			Key:   "ORD1",
 			Price: 1.7843,
 		}); err != nil {
 			return err
 		}
-		if err := mySchema.Orders.Insert(tx, &Order{
+		if err := schema.Orders.Insert(tx, &Order{
 			Num:   101,
 			Key:   "ORD2",
 			Price: 1.8912,
 		}); err != nil {
 			return err
 		}
-		if err := mySchema.Orders.Insert(tx, &Order{
+		if err := schema.Orders.Insert(tx, &Order{
 			Num:   102,
 			Key:   "ORD3",
 			Price: 1.9758,
@@ -148,9 +136,9 @@ LOOP:
 	return nil
 }
 
-type MySchema struct {
+type Schema struct {
 	*nosql.Schema
-
+	UID    string
 	Orders Orders
 
 	Items struct {
@@ -172,6 +160,7 @@ type MySchema struct {
 
 type Schema2 struct {
 	*nosql.Schema
+	UID    string
 	Orders Orders
 
 	Items struct {
@@ -193,7 +182,7 @@ type Schema2 struct {
 }
 
 type Order struct {
-	ID    nosql.DocID `json:"ID"`
+	ID    nosql.DocID `json:"_id"`
 	Num   uint64      `json:"num"`
 	Key   string      `json:"key"`
 	Price float64     `json:"price"`
@@ -211,4 +200,15 @@ type Orders struct {
 func (orders *Orders) Insert(tx *nosql.Tx, order *Order) error {
 	order.ID = orders.NextID()
 	return orders.Collection.Insert(tx, order.ID, order, nil)
+}
+
+func (orders *Orders) Update(tx *nosql.Tx, order *Order) error {
+	return orders.Collection.Update(tx, order.ID, order, nil, nil)
+}
+
+func (orders *Orders) Delete(tx *nosql.Tx, id nosql.DocID, order *Order) (bool, error) {
+	if id == 0 {
+		id = order.ID
+	}
+	return orders.Collection.Delete(tx, id, order, nil)
 }

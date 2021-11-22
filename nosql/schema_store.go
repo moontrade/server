@@ -16,8 +16,8 @@ const (
 )
 
 const (
-	schemaCollectionID  = CollectionID(1)
-	minUserCollectionID = CollectionID(100)
+	schemaCollectionID = CollectionID(1)
+	minCollectionID    = CollectionID(100)
 )
 
 // schemasStore manages all schemas in a Store.
@@ -32,8 +32,19 @@ type schemasStore struct {
 	mu              sync.Mutex
 }
 
+// Hydrate sets up a Schema in the store and performs any necessary evolution actions to adhere to
+// the new desired state.
 func (s *Store) Hydrate(ctx context.Context, schema *Schema) (<-chan EvolutionProgress, error) {
 	return s.schemas.hydrate(ctx, schema)
+}
+
+// HydrateTyped parses a typed Schema and calls Hydrate
+func (s *Store) HydrateTyped(ctx context.Context, typed interface{}) (<-chan EvolutionProgress, error) {
+	schema, err := ParseSchemaWithUID("", typed)
+	if err != nil {
+		return nil, err
+	}
+	return s.Hydrate(ctx, schema)
 }
 
 func (ss *schemasStore) findMaxSchemaID() uint32 {
@@ -129,7 +140,7 @@ func (ss *schemasStore) nextCollectionID() CollectionID {
 		max = ss.findMaxCollectionID0()
 	}
 	if max == 0 {
-		atomic.StoreUint32(&ss.maxCollectionId, uint32(minUserCollectionID))
+		atomic.StoreUint32(&ss.maxCollectionId, uint32(minCollectionID))
 		return CollectionID(atomic.LoadUint32(&ss.maxCollectionId))
 	}
 	// Fast path

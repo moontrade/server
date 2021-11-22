@@ -894,6 +894,13 @@ func (ev *evolution) apply() (<-chan EvolutionProgress, error) {
 			goto DONE
 		}
 
+		// This will ensure all collections are loaded
+		if err = ev.schema.Update(func(tx *Tx) error {
+			return nil
+		}); err != nil {
+			goto DONE
+		}
+
 		for _, drop := range indexDrops {
 			_ = drop
 		}

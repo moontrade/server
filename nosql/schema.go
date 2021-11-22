@@ -145,8 +145,6 @@ func ParseSchemaWithUID(uid string, prototype interface{}) (*Schema, error) {
 	fqn := fqnOf(t)
 	if len(uid) == 0 {
 		uid = fqn
-	} else if uid == "@" {
-		uid = ""
 	}
 
 	var (
@@ -181,6 +179,10 @@ LOOP:
 			}
 			ft = ft.Elem()
 		}
+		if ft.Kind() == reflect.String && ft.Name() == "UID" || ft.Name() == "ID" {
+			uid = fieldValue.Interface().(string)
+			schema.Meta.UID = uid
+		}
 		if ft.Kind() != reflect.Struct {
 			continue
 		}
@@ -202,6 +204,7 @@ LOOP:
 			_ = collectionField
 		}
 
+		// Overwrite existing value on typed struct
 		*(*Collection)(unsafe.Pointer(fieldValue.UnsafeAddr())) = col
 		schema.Collections = append(schema.Collections, col)
 	}

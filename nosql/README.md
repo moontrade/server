@@ -11,12 +11,12 @@ Collections are just buckets of document blobs identified by a monotonic 64bit k
 ```
 DocumentID (64-bits)
     CollectionID 16-bits
-    RowID        48-bits
+    Sequence     48-bits
 ```
 
-Given CollectionID is 16-bits and the first 100 IDs are reserved for system uses, that equates to 65436 being the max number of collections.
+Given CollectionID is 16-bits and the first 100 IDs are reserved for system uses, that equates to 65436 being the max number of collections. Each collection has a sequential keyspace of consisting of 281,479,271,743,489 sequences offset by a multiple of CollectionID. 
 
-The format of a document is not enforced. However, in order to support secondary indexes selectors that create document projections are required.
+The format of a document is not enforced. However, in order to support secondary indexes selectors that create document projections are required. Currently, GJSON is embedded to support JSON documents and JSON based selectors for projections.
 
 ### Indexes
 
@@ -25,8 +25,8 @@ Collections may have any number of secondary indexes. Of course, the more indexe
 - Int64
 - Float64
 - String
-- Full-Text (not implemented)
-- Geo (not implemented)
+- Full-Text (not implemented) *Bleve will be integrated
+- Geo (not implemented) *
 
 ### Streams
 
