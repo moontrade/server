@@ -1,0 +1,246 @@
+enum StreamKind : byte {
+	Log = 0
+	TimeSeries = 1
+	Table = 2
+}
+
+enum SchemaKind : byte {
+	Bytes			= 0		// Raw bytes
+	MoonBuf			= 1		// MoonBuf structures
+	ProtoBuf		= 2		// Protocol buffers
+	FlatBuffers		= 3		// FlatBuffers
+	Json			= 4		// Json
+	MessagePack		= 5		// MessagePack
+}
+
+struct Stream {
+	id			i64			// StreamID
+	created		i64			// Unix timestamp of creation in nanoseconds
+	accountID	i64			// AccountID that owns the stream
+	duration	i64			// Duration of a single record. Only used if kind == Series
+	record 		i32			// Record size
+	name		string32	// Optional name
+	kind		StreamKind	// Kind of stream
+	schema		SchemaKind	// Schema serialization format
+	realTime	bool		// Stream does not extend passed the immediate present
+	blockSize	byte		// Size of default blocks (1, 2, 4, 8, 16, 32, 64)
+}
+
+struct AccountStats {
+	id			i64
+	storage		Stats
+	appender	Stats
+	streams		i64
+}
+
+block AccountStatsBlock {
+    record   AccountStats
+    encoding soa
+}
+
+struct StreamStats {
+	storage		Stats			// Storage stats
+	appender	Stats			// Appender stats
+}
+
+struct Stats {
+	size		i64
+	count		i64
+	blocks		i64
+}
+
+// BlockID represents a globally unique ID of a single page of a single stream.
+// String representation
+struct BlockID {
+	streamID	i64  	// StreamID
+	id			i64		// Block ID / sequence
+}
+
+enum Compression : byte {
+	None = 0
+	LZ4 = 1
+}
+
+// BlockHeader
+struct BlockHeader {
+	id			BlockID			// StreamID
+	created		i64				// Unix Timestamp of creation in nanoseconds
+	completed	i64				// Unix Timestamp of completion in nanoseconds
+	min			i64				// Min record ID
+	max			i64				// Max record ID
+	start		i64				// Min timestamp
+	end			i64				// Max timestamp
+	storage		u64				// Cumulative storage usage including this block
+	storageU	u64				// Cumulative storage usage including this block when uncompressed
+	count		u16				// Number of records
+	size		u16				// Size of current data buffer
+	sizeU		u16				// Size of data when uncompressed
+	sizeX		u16				// Size of data when compressed
+	record		u16				// Size of record. 0 = variable length
+	encoding	Compression		// Compression algorithm used
+	kind		StreamKind		// Kind of Stream (e.g. Log, Time-Series, or Table)
+	schema		SchemaKind		// Kind of serialization format
+	realTime	bool			// Stream is real-time or time-traveler
+	pad			byte
+	blockSize	byte			// Size of uncompressed block (1, 2, 4, 8, 16, 32, 64)
+}
+
+// Block64
+struct Block64 {
+	header		BlockHeader		// Header
+	data		bytes65440		// Data
+}
+
+// Block32
+struct Block32 {
+	header		BlockHeader		// Header
+	data		bytes32672		// Data
+}
+
+// Block16
+struct Block16 {
+	header		BlockHeader		// Header
+	data		bytes16288		// Data
+}
+
+// Block8
+struct Block8 {
+	header		BlockHeader		// Header
+	data		bytes8096		// Data
+}
+
+// Block4
+struct Block4 {
+	header		BlockHeader		// Header
+	data		bytes4000		// Data
+}
+
+// Block2
+struct Block2 {
+	header		BlockHeader		// Header
+	data		bytes1952		// Data
+}
+
+// Block1
+struct Block1 {
+	header		BlockHeader		// Header
+	data		bytes928		// Data
+}
+
+struct RecordID {
+	streamID	i64
+	blockID		i64
+	id			i64
+}
+
+// EOS = End of Stream
+// The reader is caught up on the stream and is NOT subscribed
+// to new records.
+struct EOS {
+	recordID	RecordID
+	timestamp	i64
+}
+
+// EOSWaiting = End of Stream Waiting for next record.
+// The reader is caught up on the stream and is subscribed
+// to new records.
+struct EOSWaiting {
+	recordID	RecordID
+	timestamp	i64
+}
+
+enum MessageType : byte {
+	Record 			= 1
+	Records 		= 2
+	Block 			= 3
+	EOS 			= 4
+	EOSWaiting 		= 5
+	Savepoint 		= 6
+	Starting 		= 7
+	Started 		= 8
+	Stopped 		= 9
+	SyncStarted 	= 10
+	SyncProgress 	= 11
+	SyncStopped 	= 12
+}
+
+enum StopReason : byte {
+	// Stream is composed from another stream or external datasource and it stopped
+	Source 		= 1
+	// Stream has been paused
+	Paused 		= 2
+	// Stream is being migrated to a new writer
+	Migrate 	= 3
+	// Stream has stopped unexpectedly
+	Unexpected 	= 4
+}
+
+struct RecordHeader {
+	blockID		BlockID
+	id			i64
+	prevID		i64
+	timestamp	i64
+	start		i64
+	end			i64
+	seq			u16
+	sizeU		u16
+	size		u16
+	encoding	Compression
+	pad			bool
+}
+
+struct RecordsHeader {
+	header 	RecordHeader
+	count 	u16
+	record 	u16
+}
+
+struct Savepoint {
+	recordID		RecordID
+	timestamp		i64
+	duration		i64
+}
+
+struct SyncStarted {
+	recordID	RecordID
+	timestamp	i64
+}
+
+struct SyncProgress {
+	recordID	RecordID
+	timestamp	i64
+	started		i64
+	count		i64
+	remaining	i64
+}
+
+enum SyncStoppedReason : byte {
+	Success = 1
+	Error = 2
+}
+
+struct SyncStopped {
+	progress 	SyncProgress
+	message		string64
+	reason		SyncStoppedReason
+}
+
+struct Starting {
+	recordID	RecordID	// Max record ID
+	timestamp	i64			// Unix timestamp when message was created
+	writerID	i64			// ID of current writer that is appending the stream
+}
+
+struct Started {
+	recordID	RecordID	// Max record ID
+	timestamp	i64			// Unix timestamp when message was created
+	writerID	i64			// ID of current writer that is appending the stream
+	stops		i64			// Unix timestamp when stream will have a planned stop
+}
+
+struct Stopped {
+    recordID		RecordID
+	timestamp		i64				// Unix timestamp when message was created
+	starts			i64				// Unix timestamp when stream is expected to start again
+	reason			StopReason		// Reason stream was stopped
+}

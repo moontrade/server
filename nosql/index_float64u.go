@@ -39,7 +39,7 @@ func (f64 *Float64Unique) doInsert(tx *Tx) error {
 	}
 
 	// Set key to next value
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 	*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = 0
 	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
 
@@ -61,7 +61,7 @@ func (f64 *Float64Unique) doInsert(tx *Tx) error {
 		err = nil
 		keyBytes := key.UnsafeBytes()
 		if len(keyBytes) == 20 &&
-			*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+			*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.IndexMeta.ID &&
 			bigEndianF64(keyBytes[12:]) == value {
 			if *(*DocID)(unsafe.Pointer(&keyBytes[4])) != tx.docID {
 				tx.errDocID = *(*DocID)(unsafe.Pointer(&keyBytes[4]))
@@ -71,7 +71,7 @@ func (f64 *Float64Unique) doInsert(tx *Tx) error {
 		}
 	}
 
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 	*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = tx.docID
 	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
 	key = mdbx.Val{
@@ -129,7 +129,7 @@ func (f64 *Float64Unique) doUpdate(tx *Tx) error {
 		}
 
 		// Set key to existing value
-		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 		*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = 0
 		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&prevValue)))
 
@@ -152,7 +152,7 @@ func (f64 *Float64Unique) doUpdate(tx *Tx) error {
 			prevErr = nil
 			keyBytes := key.UnsafeBytes()
 			if key.Len == 20 &&
-				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.IndexMeta.ID &&
 				bigEndianF64(keyBytes[12:]) == prevValue {
 				if *(*DocID)(unsafe.Pointer(&keyBytes[4])) != tx.docID {
 					return ErrUniqueConstraint
@@ -169,7 +169,7 @@ func (f64 *Float64Unique) doUpdate(tx *Tx) error {
 
 	if !nextSkip {
 		// Set key to next value
-		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 		*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = 0
 		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&nextValue)))
 
@@ -191,7 +191,7 @@ func (f64 *Float64Unique) doUpdate(tx *Tx) error {
 			nextErr = nil
 			keyBytes := key.UnsafeBytes()
 			if len(keyBytes) == 20 &&
-				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.IndexMeta.ID &&
 				bigEndianF64(keyBytes[12:]) == nextValue {
 				// UniqueConstraint?
 				if *(*DocID)(unsafe.Pointer(&keyBytes[4])) != tx.docID {
@@ -203,7 +203,7 @@ func (f64 *Float64Unique) doUpdate(tx *Tx) error {
 			}
 		}
 
-		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 		*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = tx.docID
 		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&nextValue)))
 		key = mdbx.Val{
@@ -236,7 +236,7 @@ func (f64 *Float64Unique) doDelete(tx *Tx) error {
 	}
 
 	// Set key to next value
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 	*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = 0
 	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
 
@@ -258,7 +258,7 @@ func (f64 *Float64Unique) doDelete(tx *Tx) error {
 	err = nil
 	keyBytes := key.UnsafeBytes()
 	if key.Len == 20 &&
-		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.IndexMeta.ID &&
 		bigEndianF64(keyBytes[12:]) == value {
 		if *(*DocID)(unsafe.Pointer(&keyBytes[4])) != tx.docID {
 			return ErrUniqueConstraint

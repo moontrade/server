@@ -42,7 +42,7 @@ func (str *String) doInsert(tx *Tx) error {
 	}
 
 	// Set key to next value
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.IndexMeta.ID
 	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
 
 	var (
@@ -109,7 +109,7 @@ func (str *String) doUpdate(tx *Tx) error {
 		}
 
 		// Set key to existing value
-		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.IndexMeta.ID
 		binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
 
 		var (
@@ -132,7 +132,7 @@ func (str *String) doUpdate(tx *Tx) error {
 			prevErr = nil
 			keyBytes := key.UnsafeBytes()
 			if key.Len == keyLen &&
-				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.IndexMeta.ID &&
 				DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
 				bytes.Equal(keyBytes[12:], prevValue) {
 				if prevErr = tx.index.Delete(0); prevErr != mdbx.ErrSuccess {
@@ -146,7 +146,7 @@ func (str *String) doUpdate(tx *Tx) error {
 
 	if !nextSkip {
 		// Set key to next value
-		*(*uint32)(unsafe.Pointer(&tx.buffer[nextOffset])) = str.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[nextOffset])) = str.IndexMeta.ID
 		binary.BigEndian.PutUint64(tx.buffer[nextOffset+4:], uint64(tx.docID))
 
 		var (
@@ -179,7 +179,7 @@ func (str *String) doDelete(tx *Tx) error {
 	}
 
 	// Set key to next value
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.IndexMeta.ID
 	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
 
 	var (
@@ -201,7 +201,7 @@ func (str *String) doDelete(tx *Tx) error {
 	err = nil
 	keyBytes := key.UnsafeBytes()
 	if key.Len == keyLen &&
-		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.IndexMeta.ID &&
 		DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
 		bytes.Equal(keyBytes[12:], tx.buffer[12:]) {
 		if err = tx.index.Delete(0); err != mdbx.ErrSuccess {

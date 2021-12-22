@@ -42,7 +42,7 @@ func (str *StringUnique) doInsert(tx *Tx) error {
 	}
 
 	// Set key to next value
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.IndexMeta.ID
 	*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = 0
 
 	var (
@@ -64,7 +64,7 @@ func (str *StringUnique) doInsert(tx *Tx) error {
 		err = nil
 		keyBytes := key.UnsafeBytes()
 		if key.Len == keyLen &&
-			*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+			*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.IndexMeta.ID &&
 			bytes.Equal(keyBytes[12:], value) {
 			if *(*DocID)(unsafe.Pointer(&keyBytes[4])) != tx.docID {
 				tx.errDocID = *(*DocID)(unsafe.Pointer(&keyBytes[4]))
@@ -140,7 +140,7 @@ func (str *StringUnique) doUpdate(tx *Tx) error {
 		}
 
 		// Set key to existing value
-		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.IndexMeta.ID
 		*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = 0
 
 		var (
@@ -163,7 +163,7 @@ func (str *StringUnique) doUpdate(tx *Tx) error {
 			prevErr = nil
 			keyBytes := key.UnsafeBytes()
 			if key.Len == keyLen &&
-				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.IndexMeta.ID &&
 				bytes.Equal(keyBytes[12:], prevValue) {
 				if *(*DocID)(unsafe.Pointer(&keyBytes[4])) != tx.docID {
 					return ErrUniqueConstraint
@@ -180,7 +180,7 @@ func (str *StringUnique) doUpdate(tx *Tx) error {
 
 	if !nextSkip {
 		// Set key to next value
-		*(*uint32)(unsafe.Pointer(&tx.buffer[nextOffset])) = str.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[nextOffset])) = str.IndexMeta.ID
 		*(*DocID)(unsafe.Pointer(&tx.buffer[nextOffset+4])) = 0
 
 		var (
@@ -202,7 +202,7 @@ func (str *StringUnique) doUpdate(tx *Tx) error {
 			nextErr = nil
 			keyBytes := key.UnsafeBytes()
 			if key.Len == keyLen &&
-				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.IndexMeta.ID &&
 				bytes.Equal(keyBytes[12:], nextValue) {
 				// UniqueConstraint?
 				if *(*DocID)(unsafe.Pointer(&keyBytes[4])) != tx.docID {
@@ -244,7 +244,7 @@ func (str *StringUnique) doDelete(tx *Tx) error {
 	}
 
 	// Set key to next value
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = str.IndexMeta.ID
 
 	var (
 		keyLen = uint64(12 + len(value))
@@ -265,7 +265,7 @@ func (str *StringUnique) doDelete(tx *Tx) error {
 	err = nil
 	keyBytes := key.UnsafeBytes()
 	if key.Len == keyLen &&
-		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.meta.ID &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == str.IndexMeta.ID &&
 		bytes.Equal(keyBytes[12:], value) {
 		if *(*DocID)(unsafe.Pointer(&keyBytes[4])) != tx.docID {
 			tx.errDocID = *(*DocID)(unsafe.Pointer(&keyBytes[4]))

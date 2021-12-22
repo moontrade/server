@@ -47,8 +47,8 @@ type Index interface {
 }
 
 type indexBase struct {
-	meta  IndexMeta
-	store *indexStore
+	IndexMeta
+	store *indexStore `json:"-"`
 }
 
 func newIndexBase(
@@ -58,7 +58,7 @@ func newIndexBase(
 ) indexBase {
 	return indexBase{
 		store: &indexStore{},
-		meta: IndexMeta{indexDescriptor: indexDescriptor{
+		IndexMeta: IndexMeta{indexDescriptor: indexDescriptor{
 			Name:     name,
 			Selector: selector,
 			Version:  version,
@@ -69,23 +69,23 @@ func newIndexBase(
 }
 
 func (ib *indexBase) ID() uint32 {
-	return ib.meta.ID
+	return ib.IndexMeta.ID
 }
 
 func (ib *indexBase) Name() string {
-	return ib.meta.Name
+	return ib.IndexMeta.Name
 }
 
 func (ib *indexBase) Owner() CollectionID {
-	return ib.meta.Owner
+	return ib.IndexMeta.Owner
 }
 
 func (ib *indexBase) Meta() IndexMeta {
-	return ib.meta
+	return ib.IndexMeta
 }
 
 func (ib *indexBase) setMeta(m IndexMeta) {
-	ib.meta = m
+	ib.IndexMeta = m
 }
 
 func (ib *indexBase) getStore() *indexStore {

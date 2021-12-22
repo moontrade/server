@@ -41,7 +41,7 @@ func (f64 *Float64) doInsert(tx *Tx) error {
 	}
 
 	// Set key to next value
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
 	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
 
@@ -99,7 +99,7 @@ func (f64 *Float64) doUpdate(tx *Tx) error {
 		}
 
 		// Set key to existing value
-		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 		binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
 		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&prevValue)))
 
@@ -122,7 +122,7 @@ func (f64 *Float64) doUpdate(tx *Tx) error {
 			prevErr = nil
 			keyBytes := key.UnsafeBytes()
 			if key.Len == 20 &&
-				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+				*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.IndexMeta.ID &&
 				DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
 				bigEndianF64(keyBytes[12:]) == prevValue {
 				if prevErr = tx.index.Delete(0); prevErr != mdbx.ErrSuccess {
@@ -136,7 +136,7 @@ func (f64 *Float64) doUpdate(tx *Tx) error {
 
 	if !nextSkip {
 		// Set key to next value
-		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+		*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 		binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
 		binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&nextValue)))
 
@@ -169,7 +169,7 @@ func (f64 *Float64) doDelete(tx *Tx) error {
 	}
 
 	// Set key to next value
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = f64.IndexMeta.ID
 	binary.BigEndian.PutUint64(tx.buffer[4:], uint64(tx.docID))
 	binary.BigEndian.PutUint64(tx.buffer[12:], *(*uint64)(unsafe.Pointer(&value)))
 
@@ -191,7 +191,7 @@ func (f64 *Float64) doDelete(tx *Tx) error {
 	err = nil
 	keyBytes := key.UnsafeBytes()
 	if key.Len == 20 &&
-		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.meta.ID &&
+		*(*uint32)(unsafe.Pointer(&keyBytes[0])) == f64.IndexMeta.ID &&
 		DocID(binary.BigEndian.Uint64(keyBytes[4:])) == tx.docID &&
 		bigEndianF64(keyBytes[12:]) == value {
 		if err = tx.index.Delete(0); err != mdbx.ErrSuccess {

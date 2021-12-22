@@ -43,7 +43,7 @@ func (i64 *Int64Array) doInsert(tx *Tx) error {
 
 	sort.Sort(int64Slice(values))
 
-	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.meta.ID
+	*(*uint32)(unsafe.Pointer(&tx.buffer[0])) = i64.IndexMeta.ID
 	*(*DocID)(unsafe.Pointer(&tx.buffer[4])) = tx.docID
 
 	for _, value := range values {

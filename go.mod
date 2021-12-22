@@ -3,6 +3,7 @@ module github.com/moontrade/server
 go 1.17
 
 require (
+	github.com/DataDog/zstd v1.4.8
 	github.com/golang/snappy v0.0.4
 	github.com/gomodule/redigo v1.8.5
 	github.com/hashicorp/go-hclog v1.0.0
@@ -10,6 +11,7 @@ require (
 	github.com/mailru/easyjson v0.7.7
 	github.com/moontrade/mdbx-go v0.1.12
 	github.com/moontrade/nogc v0.1.1
+	github.com/pierrec/lz4/v4 v4.1.11
 	github.com/rs/zerolog v1.25.0
 	github.com/tidwall/gjson v1.11.0
 	github.com/tidwall/match v1.1.1

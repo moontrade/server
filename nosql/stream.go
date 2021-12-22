@@ -13,3 +13,12 @@ package nosql
 // Pages can be located by RecordID or by Timestamp.
 type Stream struct {
 }
+
+type Record struct {
+	ID   DocID
+	Time int64
+}
+
+type Page struct {
+	ID DocID
+}
